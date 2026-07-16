@@ -1351,6 +1351,160 @@ Sensor 1 → VI dev 1 → VI pipe 1 ─┘    bSyncPipe=1
 
 ---
 
+## Мега-кадр → rkadk (запись, стриминг, дисплей)
+
+**ДА!** Мега-кадр из AVS можно подать на весь пайплайн rkadk: VENC (запись H.264/H.265), VO (дисплей), VPSS (масштабирование), muxer (MP4). И **rkadk уже это умеет** — через механизм **PiP (Picture-in-Picture)**.
+
+### rkadk уже использует AVS!
+
+В `app/rkadk/src/record/rkadk_record.c` есть `RKADK_RECORD_CreateAvsChn()` (строка 469) — она создаёт AVS group и bind'ит:
+
+```
+Main VI (cam 0) ──Bind──► AVS pipe 0 ─┐
+                                       ├──► AVS chn ──Bind──► VENC (запись)
+Sub VI (cam 1)  ──Bind──► AVS pipe 1 ─┘              └──Bind──► VPSS → VO (дисплей)
+```
+
+Код из rkadk (`rkadk_record.c:1166-1230`):
+```c
+if (pstRecAttr->stPipAttr[i].bEnablePip) {
+    // AVS → VENC (запись мега-кадра в H.264/H.265)
+    ret = RK_MPI_SYS_Bind(&stAvsChn, &stDestChn);          // AVS chn → VENC
+
+    // Main VI → AVS pipe 0
+    ret = RK_MPI_SYS_Bind(&stSrcChn, &stAvspipe0Chn);      // VI cam0 → AVS pipe 0
+
+    // Sub VI → AVS pipe 1
+    ret = RK_MPI_SYS_Bind(&stAvsSubViChn, &stAvspipe1Chn); // VI cam1 → AVS pipe 1
+}
+```
+
+### PiP атрибуты в rkadk API
+
+`RKADK_PIP_ATTR_S` (`rkadk_muxer.h:168-175`):
+
+```c
+typedef struct {
+    RKADK_BOOL bEnablePip;           // включить PiP (через AVS)
+    RKADK_U32  u32AvsGrpId;          // AVS group id [0, AVS_MAX_GRP_NUM)
+    RKADK_U32  u32AvsBufCnt;         // кол-во буферов AVS (по умолчанию 2)
+    RKADK_U32  u32SubCamId;          // camera id второго сенсора
+    RKADK_STREAM_TYPE_E enSubStreamType; // тип потока второго сенсора
+    RKADK_RECT_S stSubRect;          // позиция/размер sub-окна в main-окне
+} RKADK_PIP_ATTR_S;
+```
+
+### Режим AVS в rkadk — `AVS_MODE_NOBLEND_OVL`
+
+rkadk использует `AVS_MODE_NOBLEND_OVL` (Overlay) — это **Picture-in-Picture**: main камера на весь кадр, sub камера в прямоугольнике `stSubRect` поверх.
+
+```c
+// rkadk_record.c:512
+stAvsGrpAttr.enMode     = AVS_MODE_NOBLEND_OVL;  // Overlay (PiP)
+stAvsGrpAttr.u32PipeNum = RKADK_RECORD_AVS_PIPE_NUM;  // 2
+stAvsGrpAttr.bSyncPipe  = RK_FALSE;              // ← БЕЗ синхронизации!
+```
+
+> **Важно:** rkadk использует `bSyncPipe = RK_FALSE` — нет аппаратной синхронизации. Для стерео это **не идеально** — кадры могут быть рассинхронизированы. Наш `vi_grab_avs` использует `bSyncPipe = 1` — лучше для стерео.
+
+### Как подать мега-кадр на "всё мясо" rkadk
+
+Есть **два варианта**:
+
+#### Вариант A: Использовать rkadk PiP как есть
+
+Если вас устраивает Picture-in-Picture (main камера + окошко sub камеры), просто включите `bEnablePip` в `RKADK_PIP_ATTR_S`:
+
+```c
+RKADK_PIP_ATTR_S pipAttr;
+memset(&pipAttr, 0, sizeof(pipAttr));
+pipAttr.bEnablePip       = RKADK_TRUE;
+pipAttr.u32AvsGrpId      = 0;
+pipAttr.u32AvsBufCnt     = 2;
+pipAttr.u32SubCamId      = 1;                    // второй сенсор
+pipAttr.enSubStreamType  = RKADK_STREAM_TYPE_VIDEO_MAIN;
+pipAttr.stSubRect.u32X   = 100;                  // позиция окошка
+pipAttr.stSubRect.u32Y   = 100;
+pipAttr.stSubRect.u32Width  = 320;               // размер окошка
+pipAttr.stSubRect.u32Height = 240;
+
+RKADK_RECORD_SetPipAttr(recorder, &pipAttr);
+```
+
+Результат: видео с PiP окошком, записывается в MP4 через VENC, стримится через RTSP, показывается на VO.
+
+#### Вариант B: Side-by-side мега-кадр через AVS + rkadk
+
+Для **настоящего side-by-side** (не PiP окошко, а два кадра рядом на весь экран) нужно изменить режим AVS:
+
+1. В `rkadk_record.c:512` заменить `AVS_MODE_NOBLEND_OVL` → `AVS_MODE_NOBLEND_HOR`
+2. Установить `bSyncPipe = RK_TRUE` (строка 514)
+3. Размер выхода AVS = `2W × H` (строка 517-518)
+4. VENC кодирует мега-кадр `3840x1080`
+
+```c
+// Патч для rkadk_record.c:
+stAvsGrpAttr.enMode     = AVS_MODE_NOBLEND_HOR;  // ← side-by-side (не OVL)
+stAvsGrpAttr.bSyncPipe  = RK_TRUE;               // ← аппаратная синхронизация!
+stAvsGrpAttr.stOutAttr.stSize.u32Width  = 3840;  // ← 2 × 1920
+stAvsGrpAttr.stOutAttr.stSize.u32Height = 1080;
+```
+
+После этого rkadk будет:
+- Захватывать 2 сенсора с `bSyncPipe=1`
+- Склеивать в мега-кадр `3840x1080` через AVS
+- Кодировать в H.264/H.265 через VENC
+- Записывать в MP4 через muxer
+- Стримить через RTSP
+- Показывать на дисплее через VO
+
+**Всё "мясо" rkadk работает с мега-кадром!**
+
+### Полный пайплайн мега-кадра через rkadk
+
+```
+Sensor 0 → VI dev 0 → VI pipe 0 ──Bind──► AVS pipe 0 ─┐
+                                                        │
+Sensor 1 → VI dev 1 → VI pipe 1 ──Bind──► AVS pipe 1 ──┤
+                                                        ▼
+                                          AVS Grp 0 (NOBLEND_HOR, bSyncPipe=1)
+                                                        │
+                                          AVS chn 0 (3840x1080 NV12)
+                                                        │
+                    ┌───────────────────────────────────┤
+                    │                                   │
+                    ▼                                   ▼
+              VENC 0 (H.264)                      VPSS → VO (дисплей)
+                    │
+                    ▼
+              Muxer (MP4 запись)
+                    │
+                    ▼
+              RTSP стриминг
+```
+
+### Сравнение: PiP vs Side-by-side в rkadk
+
+| | PiP (текущий rkadk) | **Side-by-side (патч)** |
+|---|---|---|
+| `AVS_MODE` | `NOBLEND_OVL` (4) | **`NOBLEND_HOR` (2)** |
+| `bSyncPipe` | `RK_FALSE` | **`RK_TRUE`** |
+| Размер | W×H (main + окошко) | **2W×H (мега-кадр)** |
+| Синхронизация | нет | **аппаратная** |
+| Запись в MP4 | да | **да** |
+| RTSP | да | **да** |
+| Дисплей (VO) | да | **да** |
+| Нужен патч? | нет | **да** (3 строки в `rkadk_record.c`) |
+
+### Резюме
+
+- **rkadk уже работает с AVS** — через PiP (`bEnablePip`)
+- **Для side-by-side** нужен патч `rkadk_record.c` (3 строки: `NOBLEND_HOR` + `bSyncPipe=TRUE` + размер `2W×H`)
+- **Мега-кадр идёт на весь пайплайн**: VENC → MP4, RTSP, VO — всё работает
+- **Альтернатива**: наш `vi_grab_avs` + свой код для VENC/RTSP (без rkadk)
+
+---
+
 ## Сборка
 
 ```bash
