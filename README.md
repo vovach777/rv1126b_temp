@@ -296,6 +296,163 @@ ret = RK_MPI_VO_EnableChn(s32VoLay, s32VoChn);
 
 ---
 
+## Что позволяет система? NPU, RGA и кастомная обработка
+
+Через rkadk ini-конфигурацию **нельзя** взять кадр и отправить в NPU. Но в SDK есть **два разных способа** работы с медиа-пайплайном, и один из них это умеет.
+
+### Подход 1: rkadk + MPI (то, что мы патчили) — "низкоуровневый"
+
+MPI предоставляет **только hardware-блоки Rockchip**:
+
+| Модуль | Что делает |
+|--------|-----------|
+| VI | Захват с сенсора |
+| VPSS | Масштабирование (через RGA/ISP) |
+| VO | Вывод на дисплей |
+| VENC | Кодирование H.264/H.265/JPEG |
+| VDEC | Декодирование |
+| AI/AO | Аудио вход/выход |
+| AENC/ADEC | Аудио кодирование |
+| RGN | Регионы (OSD-оверлеи) |
+| GDC | Геометрическая коррекция (fisheye) |
+| VGS | Video Graphics Subsystem |
+| TDE | 2D graphics engine |
+| AVS | Auto Video Stitching |
+| DIS | Digital Image Stabilization |
+| PVS | Picture Video Sync |
+
+**NPU здесь нет.** MPI работает с hardware-блоками SoC, а NPU — это отдельный процессор со своим API (`librknn.so`, не входит в rockit).
+
+#### Но! Можно вытащить кадр вручную (zero-copy)
+
+MPI позволяет получить кадр из пайплайна как `MB_BLK` (memory block):
+
+```c
+VIDEO_FRAME_INFO_S stFrame;
+// Получить кадр из VPSS
+RK_MPI_VPSS_GetChnFrame(grp, chn, &stFrame, timeout);
+
+// Получить виртуальный адрес данных
+void *data = RK_MPI_MB_Handle2VirAddr(stFrame.stVFrame.pMbBlk);
+// или физический адрес (для DMA в NPU)
+RK_U64 phys = RK_MPI_MB_Handle2PhysAddr(stFrame.stVFrame.pMbBlk);
+// или fd (для DMA-BUF import в NPU)
+RK_S32 fd = RK_MPI_MB_Handle2Fd(stFrame.stVFrame.pMbBlk);
+
+// ... здесь передаёшь data/fd в rknn_api ...
+
+// Вернуть кадр
+RK_MPI_VPSS_ReleaseChnFrame(grp, chn, &stFrame);
+```
+
+Это **не через ini** — это в C-коде. Вы прерываете пайплайн, забираете кадр, обрабатываете, возвращаете. Но это **zero-copy**: кадр лежит в DMA-памяти, NPU может работать с физическим адресом или dmabuf fd напрямую.
+
+### Подход 2: TGI (Task Graph Interface) — "высокоуровневый"
+
+В `external/rockit/tgi/` есть **полноценный графовый движок** — `RTTaskGraph`. Это гораздо ближе к идее "описал граф — оно само работает":
+
+```cpp
+// RTTaskGraph.h
+class RTTaskGraph {
+    RT_RET autoBuild(const char* config, RT_BOOL isFileType = RT_TRUE);
+    RT_RET prepare(RtMetaData *params);
+    RT_RET start();
+    RT_RET stop();
+    RTCBHandle observeOutputStream(string streamName,
+                                   function<RT_RET(RTMediaBuffer*)> callback);
+    RTTaskNode* createNode(string nodeConfig, string streamConfig);
+    RT_RET linkNode(RTTaskNode *src, RTTaskNode *dst);
+};
+```
+
+Граф описывается **JSON-файлом**, а не ini. И вот там **есть NPU**:
+
+```json
+// aicamera_rockx.json — реальный пример из SDK
+"node_4": {
+    "node_opts": {
+        "node_name": "rockx"                    // ← NPU-узел!
+    },
+    "stream_opts": {
+        "stream_input":  "eptz_face_detect_in",
+        "stream_output": "eptz_face_detect_out",
+        "stream_fmt_in":  "image:nv12",
+        "stream_fmt_out": "image:rect"
+    },
+    "stream_opts_extra": {
+        "opt_rockx_model": "rockx_face_detect"  // ← модель RKNN
+    }
+}
+```
+
+Доступные node-типы (из JSON-конфигов):
+
+| node_name | Что делает |
+|-----------|-----------|
+| `rkisp` | ISP обработка |
+| `rkzoom` | Zoom контроль |
+| `rkrga` | **RGA** — scale/crop/rotate |
+| `rockx` | **NPU** — face detect, pose, landmark, gender/age |
+| `rkeptz` | AI-based EPTZ (электронный PTZ) |
+| `link_output` | Выход графа |
+| и др. | |
+
+#### Полный пайплайн из JSON (реальный пример)
+
+```
+rkisp → rkzoom → rockx(face_detect) → rkeptz → rkrga(scale) → link_output
+```
+
+Это именно то, что хочется: **кадр с камеры → RGA (scale) → NPU (inference) → результат**. И всё это декларативно в JSON.
+
+#### Что умеет rockx (NPU-узел)
+
+Из `RTMediaRockx.h`:
+
+```c
+ROCKX_FACE_DETECT       // детекция лиц
+ROCKX_FACE_LANDMARK     // ключевые точки лица
+ROCKX_POSE_BODY         // поза тела
+ROCKX_POSE_BODY_V2      // поза тела v2
+ROCKX_POSE_FINGER       // жесты пальцами
+ROCKX_FACE_GENDER_AGE   // пол и возраст
+```
+
+Это предобученные модели через `librknn.so`. Для своих моделей нужен `rknn_api` напрямую.
+
+### Сравнение двух подходов
+
+| | rkadk + MPI | TGI (Task Graph) |
+|---|---|---|
+| **Конфиг** | ini-файлы | JSON-файлы |
+| **NPU?** | Нет (только через ручной GetChnFrame + rknn_api) | Да (`rockx` node) |
+| **RGA?** | Да (VPSS через `VIDEO_PROC_DEV_RGA`) | Да (`rkrga` node) |
+| **Гибкость** | Низкая — фиксированные пайплайны | Высокая — произвольный граф |
+| **Уровень** | C API, оркестрация в rkadk | C++ API, графовый движок |
+| **Свой код в графе?** | Да (GetChnFrame → свой код → SendFrame) | Да (custom RTTaskNode) |
+| **Zero-copy?** | Да (MB_BLK / dmabuf) | Да (RTMediaBuffer) |
+
+### Ответ: можно ли взять кадр с RGA и отправить в NPU?
+
+**Два пути:**
+
+1. **TGI (рекомендуемый)** — описать граф в JSON: `rkisp → rkrga → rockx → ...`. NPU встроен как node. Но предустановленные модели — только `rockx_*`. Для своих моделей нужен custom node.
+
+2. **MPI + rknn_api (ручной)** — в C-коде:
+   ```c
+   RK_MPI_VPSS_GetChnFrame(...);          // забрать кадр из VPSS/RGA
+   fd = RK_MPI_MB_Handle2Fd(mb);          // получить dmabuf fd
+   rknn_inputs_set(ctx, 1, &input);       // отправить в NPU через rknn_api
+   rknn_run(ctx, nullptr);                // inference
+   rknn_outputs_get(ctx, 1, outputs, ...);// результат
+   RK_MPI_VPSS_ReleaseChnFrame(...);      // вернуть кадр
+   ```
+   Это **не через ini**, но zero-copy и полный контроль. `librknn.so` — отдельная библиотека (не входит в этот репо, нужна из RKNN-SDK).
+
+Через rkadk ini **нельзя** — rkadk не знает про NPU. TGI JSON — можно, но только с предустановленными rockx-моделями. Для своих моделей — MPI + rknn_api вручную.
+
+---
+
 ## Сборка
 
 ```bash
