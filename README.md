@@ -1505,6 +1505,166 @@ Sensor 1 → VI dev 1 → VI pipe 1 ──Bind──► AVS pipe 1 ──┤
 
 ---
 
+## Можно ли настроить мега-кадр через INI?
+
+### Короткий ответ
+
+| Фреймворк | INI-настройка AVS? | Что нужно? |
+|-----------|:---:|---|
+| **rkipc dual_ipc** | **ДА** (секция `[avs]`) | раскомментировать bind VI→AVS (1 строка) |
+| **rkadk** | **НЕТ** | патч C-кода (3 строки) |
+| **V4L2** | — | не нужен (но и нет encoding/streaming) |
+
+### rkipc dual_ipc: ДА, INI уже есть!
+
+`rkipc` читает AVS-настройки из INI (`rkipc-dual-800w.ini`, секция `[avs]`):
+
+```ini
+[avs]
+sensor_num = 2
+source_width = 3840          ; ширина одного сенсора
+source_height = 2160
+enable_avs = 0               ; ← включить AVS!
+avs_width = 3840
+avs_height = 1080
+avs_mode = 0                 ; 0=BLEND, 1=NOBLEND_VER, 2=NOBLEND_HOR, 3=NOBLEND_QR
+sync = 0                     ; ← bSyncPipe (1 = аппаратная синхронизация!)
+param_source = 1             ; 0=LUT, 1=CALIB
+calib_file_path = /oem/usr/share/avs_calib/calib_file.xml
+stitch_distance = 5
+enable_venc_0 = 1            ; H.264 кодирование
+enable_venc_1 = 1
+enable_rtsp = 1              ; RTSP стриминг
+enable_vo = 1                ; вывод на дисплей
+```
+
+**Для мега-кадра через rkipc — просто поменять INI:**
+
+```ini
+[avs]
+enable_avs = 1               ; ← включить AVS
+avs_mode = 2                 ; ← NOBLEND_HOR (side-by-side)
+sync = 1                     ; ← аппаратная синхронизация!
+source_width = 1920          ; ← размер одного сенсора
+source_height = 1080
+avs_width = 3840             ; ← мега-кадр 2×1920
+avs_height = 1080
+```
+
+**НО!** В rkipc dual_ipc bind VI→AVS **закомментирован** (`video.c:535-541`):
+
+```c
+// if (enable_avs) {
+//     ret = RK_MPI_SYS_Bind(&vi_chn[i], &avs_in_chn[i]);  // ← ЗАКОММЕНТИРОВАНО!
+// }
+```
+
+Вместо этого rkipc bind'ит **VI → VENC напрямую** (минуя AVS):
+```c
+ret = RK_MPI_SYS_Bind(&vi_chn[0], &venc_chn[0]);  // VI cam0 → VENC0 (без AVS!)
+ret = RK_MPI_SYS_Bind(&vi_chn[1], &venc_chn[1]);  // VI cam1 → VENC1 (без AVS!)
+```
+
+AVS используется только для IVS/NPU (`avs_out_chn[1] → ivs_chn`), не для кодирования.
+
+**Чтобы мега-кадр шёл на VENC через rkipc — нужно раскомментировать 1 блок:**
+
+```c
+// Патч для video.c:535-541 (rkipc dual_ipc):
+if (enable_avs) {
+    ret = RK_MPI_SYS_Bind(&vi_chn[i], &avs_in_chn[i]);   // ← раскомментировать!
+    // И вместо VI→VENC bind'ить AVS→VENC:
+    // ret = RK_MPI_SYS_Bind(&avs_out_chn[0], &venc_chn[0]);
+}
+```
+
+После этого + INI-настройка → rkipc будет:
+1. Захватывать 2 сенсора
+2. Склеивать через AVS (`NOBLEND_HOR`, `bSyncPipe=1`)
+3. Кодировать мега-кадр в H.264 (VENC)
+4. Стримить через RTSP
+5. Показывать на дисплее (VO)
+
+**Всё через INI + 1 патч!**
+
+### rkadk: НЕТ, только через C-код
+
+rkadk **не читает** AVS-настройки из INI. В `rkadk_setting.ini` **нет секции `[avs]`** — PiP настраивается программно:
+
+```c
+// Только через C-код:
+RKADK_PIP_ATTR_S pipAttr = {.bEnablePip = RKADK_TRUE, ...};
+RKADK_RECORD_SetPipAttr(recorder, &pipAttr);
+```
+
+И режим AVS захардкожен в `rkadk_record.c:512`:
+```c
+stAvsGrpAttr.enMode     = AVS_MODE_NOBLEND_OVL;  // захардкожено!
+stAvsGrpAttr.bSyncPipe  = RK_FALSE;              // захардкожено!
+```
+
+**Почему так?** rkadk — это **библиотека/SDK** для разработчиков приложений. Rockchip предполагает что вы сами пишете приложение и вызываете API. INI-файлы rkadk (`rkadk_setting.ini`) содержат только параметры кодирования (разрешение, битрейт, профиль), но не архитектуру пайплайна.
+
+rkipc — это **готовое приложение**. У него INI управляет всем, включая архитектуру пайплайна (какие модули включить, как bind'ить).
+
+### Почему V4L2 "бесплатно"?
+
+**V4L2 (Video4Linux2)** — это **API ядра Linux**, не Rockchip-библиотека:
+
+| | V4L2 | rockit (MPI) |
+|---|---|---|
+| Что это | Linux kernel API | Rockchip proprietary library |
+| Где живёт | в ядре Linux (`/dev/video*`) | `librockit.so` (закрытый код) |
+| Цена | **бесплатно** (GPL, в ядре) | проприетарно (нужна лицензия/SDK) |
+| Доступ | `open("/dev/video0")` | `RK_MPI_SYS_Init()` |
+| Что даёт | **только сырые кадры** (NV12/YUYV) | VI → ISP → VENC → VO → RTSP → MP4 |
+| Encoding | **нет** | H.264/H.265 (hardware) |
+| Streaming | **нет** | RTSP/RTMP |
+| Запись | **нет** | MP4/muxer |
+| Дисплей | **нет** | VO (video output) |
+
+**V4L2 "бесплатно" потому что:**
+1. Это часть **ядра Linux** (GPL) — всегда доступно, не нужно ничего ставить
+2. Драйвер сенсора в ядре уже настроен через DTS — V4L2 просто открывает `/dev/video0`
+3. Но V4L2 даёт **только сырые кадры** — без кодирования, стриминга, записи
+
+```bash
+# V4L2 — бесплатно, но только сырые кадры:
+v4l2-ctl --device=/dev/video0 --set-fmt-video=width=1920,height=1080,pixelformat=NV12
+v4l2-ctl --device=/dev/video0 --stream-mmap --stream-count=1 --stream-to=frame.raw
+# → frame.raw = сырой NV12, никакого H.264/MP4/RTSP
+```
+
+**Для encoding/streaming нужен rockit** (или librga для RGA, или свой VENC через V4L2 — но это сложно).
+
+### Сравнение: как получить мега-кадр + H.264 + RTSP
+
+| Путь | INI? | Патч? | Что работает | Сложность |
+|------|:---:|:---:|---|:---:|
+| **rkipc + INI** | ДА | 1 блок раскомментировать | VENC + RTSP + VO | **низкая** |
+| **rkadk + патч** | нет | 3 строки C | VENC + MP4 + RTSP + VO | средняя |
+| **vi_grab_avs** | нет | готово | только сырой мега-кадр | **низкая** |
+| **V4L2 напрямую** | DTS | нет | только сырые кадры | высокая |
+
+### Рекомендация
+
+**Самый простой путь к мега-кадру + H.264 + RTSP:**
+
+1. Берёте `rkipc dual_ipc` (уже есть в SDK)
+2. Меняете INI (`rkipc-dual-800w.ini`):
+   ```ini
+   [avs]
+   enable_avs = 1
+   avs_mode = 2        ; NOBLEND_HOR
+   sync = 1            ; bSyncPipe
+   ```
+3. Раскомментируете bind VI→AVS в `video.c:535-541` + меняете bind VI→VENC на AVS→VENC
+4. Собираете rkipc → запускаете → получаете RTSP-стрим с мега-кадром
+
+**Если нужна запись в MP4** — добавьте rkadk muxer, или используйте rkadk с патчем (Вариант B выше).
+
+---
+
 ## Сборка
 
 ```bash
