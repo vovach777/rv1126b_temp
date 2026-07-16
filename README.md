@@ -351,16 +351,29 @@ RK_MPI_VPSS_ReleaseChnFrame(grp, chn, &stFrame);
 
 В `external/rockit/tgi/` есть заголовки графового движка `RTTaskGraph` и JSON-конфиги с NPU-узлами. Это реальная подсистема Rockchip, которая позволяет описывать пайплайны в JSON с узлами `rockx` (NPU), `rkrga` (RGA), `rkeptz` (AI PTZ) и др.
 
-**Но в этом SDK TGI не скомпилирован в `librockit.so`.** Проверка бинарников (поиск строк `RTTaskGraph`, `RTTaskNode`, `autoBuild`, `rockx`):
+**Но в этом SDK TGI не скомпилирован в `librockit.so`.** Проверка бинарника `librockit.so` (rv1126b arm64) поиском строк:
 
-| Строка | rv1126b arm64 | rv1126b arm | rk3588 | rv1106 full |
-|--------|:---:|:---:|:---:|:---:|
-| `RK_MPI` (MPI) | **FOUND** | **FOUND** | **FOUND** | **FOUND** |
-| `RTTaskGraph` (TGI) | NOTFOUND | NOTFOUND | NOTFOUND | NOTFOUND |
-| `rockx` | NOTFOUND | NOTFOUND | NOTFOUND | NOTFOUND |
-| `rknn` | FOUND | — | — | — |
+| Символ/строка | Есть? | Примечание |
+|---------------|:---:|-----------|
+| `RK_MPI_VI_GetChnFrame` | **FOUND** | Получение кадра из VI |
+| `RK_MPI_VPSS_GetChnFrame` | **FOUND** | Получение кадра из VPSS |
+| `RK_MPI_VO_SendFrame` | **FOUND** | Отправка кадра на дисплей |
+| `RK_MPI_SYS_Bind` | **FOUND** | Связывание каналов |
+| `RK_MPI_MB_Handle2Fd` | **FOUND** | DMA-BUF fd из кадра |
+| `RK_MPI_MB_Handle2VirAddr` | **FOUND** | Виртуальный адрес из кадра |
+| `RK_MPI_VENC_SendFrame` | **FOUND** | Кодирование |
+| `RK_MPI_SYS_Init` | **FOUND** | Инициализация |
+| `RTTaskGraph` (TGI) | NOTFOUND | TGI не скомпилирован |
+| `RTTaskNode` (TGI) | NOTFOUND | TGI не скомпилирован |
+| `autoBuild` (TGI) | NOTFOUND | TGI не скомпилирован |
+| `rockx` | NOTFOUND | RockX нет (отдельная .so, не входит) |
+| `rockiva` | NOTFOUND | RockIva нет (отдельная .so, не входит) |
+| `rknn_init` / `rknn_run` | NOTFOUND | RKNN API нет (отдельная .so) |
+| строка `rknn` | FOUND | Только `dlopen("librknnmrt.so")` для аудио SKV — не реализация |
 
-TGI отсутствует во **всех** `librockit.so` в SDK. Дополнительно, `RockitConfig.cmake` ссылается на `lib/lib64/librockit.so` — путь, которого не существует. Отдельной `libtgi.so` нет.
+> **Важно:** строка `rknn` в `librockit.so` — это **не** реализация RKNN API. Это `dlopen("librknnmrt.so")` в аудио-модуле SKV (звуковая обработка DOA) и лог-сообщение `"can not open library(%s), it may not need NPU"`. Реальные функции `rknn_init`/`rknn_run`/`rknn_inputs_set` отсутствуют — они в отдельной `librknnmrt.so` из RKNN-SDK.
+
+TGI отсутствует в `librockit.so`. Дополнительно, `RockitConfig.cmake` ссылается на `lib/lib64/librockit.so` — путь, которого не существует. Отдельной `libtgi.so` нет.
 
 Возможно TGI доступен в полном Rockchip SDK как отдельный пакет, или требует другой сборки `librockit.so`. Но в этом репо — **только MPI**.
 
