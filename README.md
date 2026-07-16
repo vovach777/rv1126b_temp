@@ -196,6 +196,106 @@ rkadk_setting_sensor_1.ini   → CamId=1 → vo_chn=1, x=540,   width=540
 
 ---
 
+## Архитектура: где живёт конфигурационное программирование?
+
+Система конфигурационного программирования пайплайна — **полностью в открытом коде rkadk**. Закрытая библиотека `librockit.so` ничего не знает про ini-файлы.
+
+### Три слоя
+
+```
+┌─────────────────────────────────────────────────────┐
+│  INI-файлы (rkadk_setting_sensor_0.ini)             │  ← конфигурация
+│  [sensor] [vi.0] [display] [record] ...              │
+├─────────────────────────────────────────────────────┤
+│  rkadk (открытый C-код, ~4638 строк)                 │  ← парсинг + оркестрация
+│                                                      │
+│  rkadk_param.c          → RKADK_Ini2Struct()         │  читает ini → C-структуры
+│  rkadk_struct2ini.c     → iniparser_load()           │  generic ini↔struct mapper
+│  rkadk_param_map.h      → g_stDispCfgMapTable[]      │  "display:width" → offset в struct
+│  rkadk_disp.c           → RKADK_DISP_Init()          │  берёт struct → вызывает MPI
+│  rkadk_media_comm.c     → RKADK_MPI_VO_Init()        │  обёртка над MPI
+├─────────────────────────────────────────────────────┤
+│  librockit.so / librockit.a (ЗАКРЫТАЯ, ~1.4 МБ)      │  ← реализация MPI
+│                                                      │
+│  RK_MPI_VO_SetChnAttr()   → драйвер VO               │
+│  RK_MPI_VPSS_Init()       → драйвер VPSS             │
+│  RK_MPI_SYS_Bind()        → системный bind            │
+│  RK_MPI_VI_Init()         → драйвер VI                │
+└─────────────────────────────────────────────────────┘
+```
+
+### Как это работает по шагам
+
+**1. ini → C-структуры** (открытый код, `rkadk_param.c:1791`)
+
+```c
+ret = RKADK_Ini2Struct(sensorPath[i], &pstCfg->stMediaCfg[i].stDispCfg,
+                       pstMapTableCfg->pstMapTable,
+                       pstMapTableCfg->u32TableLen);
+```
+
+`RKADK_Ini2Struct` (`rkadk_struct2ini.c:54`) — generic парсер. Берёт map-таблицу:
+
+```c
+// rkadk_param_map.h:344
+static RKADK_SI_CONFIG_MAP_S g_stDispCfgMapTable[] = {
+    DEFINE_MAP(display, tagRKADK_PARAM_DISP_CFG_S, int_e, x),
+    DEFINE_MAP(display, tagRKADK_PARAM_DISP_CFG_S, int_e, y),
+    DEFINE_MAP(display, tagRKADK_PARAM_DISP_CFG_S, int_e, width),
+    DEFINE_MAP(display, tagRKADK_PARAM_DISP_CFG_S, int_e, height),
+    ...
+    DEFINE_MAP(display, tagRKADK_PARAM_DISP_CFG_S, int_e, vo_chn),
+};
+```
+
+`DEFINE_MAP` генерирует запись: секция `"display"`, поле `"width"`, тип `int`, смещение `offsetof(tagRKADK_PARAM_DISP_CFG_S, width)`. Парсер читает `display:width = 540` из ini и пишет `540` по этому смещению в структуру. Чистый reflection через offset — никаких хардкод-парсеров на каждое поле.
+
+**2. C-структуры → MPI вызовы** (открытый код, `rkadk_disp.c:65-68`)
+
+```c
+stChnAttr.stRect.s32X = pstDispCfg->x;           // из ini
+stChnAttr.stRect.s32Y = pstDispCfg->y;
+stChnAttr.stRect.u32Width = pstDispCfg->width;    // 540
+stChnAttr.stRect.u32Height = pstDispCfg->height;  // 1920
+```
+
+Потом:
+
+```c
+// rkadk_media_comm.c:1406 — обёртка rkadk
+ret = RK_MPI_VO_SetChnAttr(s32VoLay, s32VoChn, pstChnAttr);
+ret = RK_MPI_VO_EnableChn(s32VoLay, s32VoChn);
+```
+
+**3. MPI → железо** (закрытая `librockit.so`)
+
+`RK_MPI_VO_SetChnAttr` — это **только декларация** в `rk_mpi_vo.h`. Реализация — внутри `librockit.so`. Библиотека общается с kernel-драйверами VO/VPSS/VI через ioctl. Она не знает про ini — она получает готовые C-структуры (`VO_CHN_ATTR_S`).
+
+### Что где находится
+
+| Компонент | Где | Что делает |
+|-----------|-----|------------|
+| **ini-файлы** | открыто | Описание пайплайна |
+| **iniparser** | открыто (`src/third-party/iniparser/`) | Generic ini-парсер (сторонняя библиотека) |
+| **RKADK_Ini2Struct** | открыто (`rkadk_struct2ini.c`) | Reflection: ini → C-struct через map-таблицы |
+| **Map-таблицы** | открыто (`rkadk_param_map.h`) | `"display:width"` → `offsetof(struct, width)` |
+| **rkadk_param.c** | открыто (4638 строк) | Загрузка/сохранение/проверка всех конфигов |
+| **rkadk_disp.c** | открыто | Оркестрация: берёт struct → вызывает MPI |
+| **rkadk_media_comm.c** | открыто | Обёртки `RKADK_MPI_*` над `RK_MPI_*` |
+| **RK_MPI_VO_\*** | **закрыто** (`librockit.so`) | Реализация: ioctl к kernel-драйверам |
+| **RK_MPI_VPSS_\*** | **закрыто** | То же |
+| **RK_MPI_SYS_Bind** | **закрыто** | То же |
+
+### Аналогия
+
+- **librockit.so** — это как **GStreamer daemon**: управляет hardware-блоками (VI, VPSS, VO, VENC), но через C API (MPI), не через pipeline-описание.
+- **rkadk** — это как **GStreamer pipeline builder**: читает ini-описание пайплайна и вызывает MPI-функции чтобы его построить.
+- **ini-файлы** — это как **GStreamer launch string**: декларативное описание графа.
+
+Можно сказать, что rkadk — это **тонкий оркестратор над MPI**. Вся "магия" конфигурационного программирования (ini→struct→MPI) — в открытом коде. Закрытая библиотека — это просто hardware abstraction layer, она не знает ничего про конфигурацию.
+
+---
+
 ## Сборка
 
 ```bash
