@@ -1,0 +1,216 @@
+# RV1126B Dual Camera SDK
+
+Отфильтрованный SDK Rockchip RV1126B с поддержкой **двухкамерного отображения** (dual camera display). Репозиторий содержит только необходимую часть SDK — `app/` и `external/rockit/` — без тяжёлой истории и kernel/uboot.
+
+## Источник
+
+- **Origin SDK:** `rv1126b-linux6.1` (Rockchip RV1126B, ядро Linux 6.1)
+- **Базовый коммит:** `7285d5c2f` ("Fix(4g): EC20 LTE automatic connection at startup")
+- **Содержимое:** `app/` (ipcweb-backend, lvgl_demo, rkadk, rkipc) + `external/rockit/`
+
+## Поддерживаемые платформы
+
+| Чип | Архитектура | Конфиги rkipc |
+|-----|-------------|---------------|
+| **RV1126B** | arm64 | `rv1126b_ipc`, `rv1126b_dv`, `rv1126b_dual_ipc` |
+| RV1126 | arm32 | `rv1126_ipc_rockit`, `rv1126_aiisp_ipc`, `rv1126_battery_ipc`, и др. |
+| RV1106 / RV1103B | arm32 | `rv1106_ipc`, `rv1106_dual_ipc`, и др. |
+| RK3588 / RK3576 | arm64 | `rk3588_ipc`, `rk3576_ipc` |
+
+---
+
+## Dual Camera Display
+
+Главная доработка — **одновременный вывод двух камер** на один VO-слой через RGA-композитор. Каждая камера получает свой `vo_chn` и прямоугольник на дисплее.
+
+### Архитектура пайплайна
+
+```
+Cam 0 (цветная) ─→ VI ─→ VPSS ─→ VO (layer 0, chn 0) ─→ окно (x₀, y₀, W, H)
+Cam 1 (серая)   ─→ VI ─→ VPSS ─→ VO (layer 0, chn 1) ─→ окно (x₁, y₁, W, H)
+```
+
+Обе камеры идут через один `vo_layer=0`, но разные `vo_chn` (0 и 1). `splice_mode=RGA` включает аппаратный композитор Rockchip RGA, который смешивает каналы в один кадр.
+
+### Раскладки экрана
+
+#### RV1106 / RV1103B (дисплей 320×480, ландшафт)
+
+```
+┌──────────┬──────────┐
+│          │          │
+│  Cam 0   │  Cam 1   │
+│ 256×N    │ 256×N    │
+│ x=0      │ x=264    │
+│ vo_chn=0 │ vo_chn=1 │
+│          │          │
+└──────────┴──────────┘
+  0        256  264   480
+```
+
+- Sensor 0: `x=0`, `vo_chn=0`, `width=320` (полная ширина, RGA обрезает)
+- Sensor 1: `x=320`, `vo_chn=1`, `width=320`
+
+#### RV1126B (дисплей 1080×1920, портрет)
+
+```
+┌──────────┬──────────┐
+│          │          │
+│          │          │
+│  Cam 0   │  Cam 1   │
+│ 540×1920 │ 540×1920 │
+│ x=0      │ x=540    │
+│ vo_chn=0 │ vo_chn=1 │
+│          │          │
+│          │          │
+└──────────┴──────────┘
+  0       540       1080
+```
+
+- Sensor 0: `x=0`, `width=540`, `vo_chn=0`
+- Sensor 1: `x=540`, `width=540`, `vo_chn=1`
+
+---
+
+## Изменённые файлы
+
+### C-код (общий для всех платформ)
+
+| Файл | Изменение |
+|------|-----------|
+| `app/rkadk/src/display/rkadk_disp.c` | `stDispHandle` → массив `stDispHandle[RKADK_MAX_SENSOR_CNT]` с индексацией по `u32CamId`. Каждая камера получает независимый handle (bInit, tid, bSendBuffer, u32CamId). |
+| `app/rkadk/examples/CMakeLists.txt` | Добавлена цель сборки `rkadk_dual_disp_test` |
+| `app/rkadk/examples/rkadk_dual_disp_test.c` | **Новый файл** — test app для запуска двух камер |
+
+### INI-конфиги RV1106
+
+| Файл | Изменение |
+|------|-----------|
+| `app/rkadk/inicfg/rv1106_1103/rkadk_setting_sensor_1.ini` | `x: 0→320`, `vo_chn: 0→1` |
+| `app/rkadk/inicfg/rv1106_1103/rkadk_defsetting_sensor_1.ini` | `x: 0→320`, `vo_chn: 0→1` |
+
+### INI-конфиги RV1126B
+
+| Файл | Изменение |
+|------|-----------|
+| `app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_0.ini` | `width: 1080→540` |
+| `app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_0.ini` | `width: 1080→540` |
+| `app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_1.ini` | `x: 0→540`, `width: 1080→540`, `vo_chn: 0→1` |
+| `app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_1.ini` | `x: 0→540`, `width: 1080→540`, `vo_chn: 0→1` |
+
+### Патч-файлы (в корне репо)
+
+| Файл | Описание |
+|------|----------|
+| `dual_camera_patch.diff` | Патч для RV1106 (C-код + ini + CMakeLists) |
+| `dual_camera_patch_rv1126b.diff` | Патч ini-конфигов для RV1126B |
+| `dual_camera_patch_README.md` | Оригинальное описание патча RV1106 |
+| `apply_patch.sh` | Скрипт применения патча |
+
+---
+
+## Ключевое изменение: массив хэндлов по CamId
+
+**До** — один глобальный handle на все камеры:
+
+```c
+static RKADK_DISP_HANDLE_S stDispHandle = {
+    .bInit = false, .u32CamId = 0, .bSendBuffer = false, .tid = 0};
+```
+
+**После** — массив по количеству сенсоров, каждая камера независима:
+
+```c
+static RKADK_DISP_HANDLE_S stDispHandle[RKADK_MAX_SENSOR_CNT] = {
+    [0 ... RKADK_MAX_SENSOR_CNT - 1] = {
+        .bInit = false, .u32CamId = 0, .bSendBuffer = false, .tid = 0}};
+```
+
+Все обращения `stDispHandle.bInit` → `stDispHandle[u32CamId].bInit` в `RKADK_DISP_Init()` и `RKADK_DISP_DeInit()`. Это позволяет вызывать `RKADK_DISP_Init(0)` и `RKADK_DISP_Init(1)` независимо — каждая камера создаёт свой VPSS, VO-канал и поток.
+
+### Особенность для RV1126B
+
+Код в `#if defined(RV1106_1103) || defined(RV1103B)` (поток `RKADK_DISP_GetVpssMb`) **не компилируется** для RV1126B. RV1126B использует путь `RKADK_MPI_SYS_Bind` (VPSS→VO через системный bind), а не ручную пересылку кадров в потоке. Патч корректно обходит это — изменения `tid`/`bSendBuffer` применяются только к RV1106, а массив хэндлов и проверки `bInit` — общие.
+
+---
+
+## Сборка
+
+```bash
+# Настройка окружения (на Linux-машине сборки)
+export PATH=$PATH:/path/to/toolchain/bin
+
+# Применить патчи к чистому SDK (если нужно)
+git apply dual_camera_patch.diff
+git apply dual_camera_patch_rv1126b.diff
+
+# Сборка rkadk_dual_disp_test
+cd build
+cmake .. -DRK_MEDIA_CHIP=rv1126b -DARCH64=ON
+make rkadk_dual_disp_test
+```
+
+## Запуск
+
+```bash
+# По умолчанию: 256px ширина, высота пропорциональна, два окна рядом
+rkadk_dual_disp_test -a /etc/iqfiles -p /data/rkadk
+
+# Свои параметры
+rkadk_dual_disp_test -W 256 -H 0 -g 8 -s 0
+
+# Параметры:
+#   -a  путь к IQ-файлам (default: /etc/iqfiles)
+#   -p  путь к ini-параметрам (default: /data/rkadk)
+#   -W  ширина окна в пикселях (0 = использовать высоту)
+#   -H  высота окна в пикселях (0 = пропорционально ширине)
+#   -s  начальный offset первого окна (default: 0)
+#   -g  зазор между окнами в пикселях (default: 8)
+```
+
+---
+
+## Важные замечания
+
+- **Sensor 1** по умолчанию `used_isp = FALSE`. Если вторая матрица — ISP-сенсор, поставь `used_isp = TRUE` в `rkadk_setting_sensor_1.ini` и проверь `device_name`.
+- Для **чёрно-белой матрицы** без IR-фильтра могут понадобиться отдельные IQ-файлы.
+- `rotation=1` (поворот 90°) остаётся у обоих сенсоров RV1126B — если поворот не нужен, уберите его в ini.
+- `RKADK_MAX_SENSOR_CNT` должен быть ≥ 2 для двухкамерной конфигурации.
+
+---
+
+## Структура репозитория
+
+```
+.
+├── app/
+│   ├── ipcweb-backend/     # REST API backend для IP-камер
+│   ├── lvgl_demo/          # LVGL UI демо
+│   ├── rkadk/              # Rockchip ADK (media framework)
+│   │   ├── examples/       # Тестовые приложения
+│   │   │   └── rkadk_dual_disp_test.c   # ← NEW: dual camera test
+│   │   ├── inicfg/
+│   │   │   ├── rv1106_1103/  # ini для RV1106/RV1103B
+│   │   │   └── rv1126b/      # ini для RV1126B
+│   │   └── src/display/rkadk_disp.c   # ← MODIFIED: per-CamId handles
+│   └── rkipc/              # Rockchip IPC приложение
+│       └── src/
+│           ├── rv1126b_ipc/
+│           ├── rv1126b_dv/
+│           ├── rv1126b_dual_ipc/
+│           └── ...         # конфиги для разных платформ
+├── external/rockit/        # Rockit MPI (медиа API)
+│   ├── lib/arm/rv1126b/    # 32-бит библиотеки
+│   ├── lib/arm64/rv1126b/  # 64-бит библиотеки
+│   └── mpi/                # MPI headers и examples
+├── dual_camera_patch.diff            # патч RV1106
+├── dual_camera_patch_rv1126b.diff    # патч RV1126B
+└── dual_camera_patch_README.md       # оригинальное описание
+```
+
+## Git-история
+
+| Коммит | Описание |
+|--------|----------|
+| `36f0c5c` | Initial commit — чистый SDK из `rv1126b-linux6.1 @ 7285d5c2f` |
+| `dac2b43` | feat(dual_camera) — двухкамерный дисплей для RV1106 и RV1126B |
