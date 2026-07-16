@@ -1194,6 +1194,62 @@ ffmpeg -pix_fmt nv12 -s 3840x1080 -i mega_3840x1080_pts12345678_nv12.raw -f imag
 
 - `app/vi_grab_frame/vi_grab_avs.c` — исходник (~400 строк)
 
+#### Тестировано на реальной плате RV1126B
+
+**Результат: РАБОТАЕТ!**
+
+Плата: RV1126B, 2× GC2093 (I2C 0x37 и 0x7e), одношлейфовая стереокамера.
+
+```
+$ /tmp/vi_grab_avs -w 1920 -h 1080 -n 1 -v -t 15000
+vi_grab_avs: 1920x1080 per sensor, mode=NOBLEND_HOR, sync=1, mega=3840x1080, frames=1
+...
+AVS: NOBLEND without calib (empty LUT)
+RK_MPI_AVS_CreateGrp OK (mode=2, sync=1, pipes=2)
+AVS: GetFinalLut OK
+AVS chn 0: enabled (3840x1080)
+Bind VI[0,0] → AVS[0,0] OK
+Bind VI[1,0] → AVS[0,1] OK
+AVS group started
+Waiting for mega-frames (sync=1, this may take a few seconds)...
+Frame 0: 3840x1080 pts=8420618673us grab=168ms → mega_3840x1080_pts8420618673_nv12.raw (6221824 bytes)
+```
+
+- **Мега-кадр**: 3840×1080 NV12, 6.2MB
+- **PTS**: 8420618673us (единая для обоих сенсоров!)
+- **Время захвата**: 168ms (включает sync wait + hardware stitch)
+- **Синхронизация**: `bSyncPipe=1` — аппаратная
+
+Топология камеры на плате:
+```
+GC2093 (0x37) → MIPI-CSI2 → rkcif-mipi-lvds  → rkisp-vir0 → /dev/video22 (1920x1080)
+GC2093 (0x7e) → MIPI-CSI2 → rkcif-mipi-lvds2 → rkisp-vir1 → /dev/video30 (1920x1080)
+```
+
+Два отдельных ISP (vir0 и vir1) — это **Путь 3** (AVS), не Путь 1 (DTS мега-кадр).
+
+#### Кросс-компиляция (zig cc)
+
+На плате нет gcc. Кросс-компиляция с помощью `zig cc`:
+
+```bash
+# Скачать librockit.so с платы (для линковки)
+python _ssh_scp.py download librockit.so /usr/lib/librockit.so
+
+# Кросс-компиляция (на Windows, для aarch64-linux)
+zig cc -target aarch64-linux-gnu -O2 \
+  -I sdk/external/rockit/mpi/sdk/include \
+  -I sdk/external/rockit/lib/arm64/rv1126b \
+  -L _board_lib -lrockit -lpthread -lm \
+  -o vi_grab_avs app/vi_grab_frame/vi_grab_avs.c
+
+# Загрузить на плату
+python _ssh_scp.py upload vi_grab_avs /tmp/vi_grab_avs
+
+# Запустить на плате
+ssh root@10.0.55.160 "chmod +x /tmp/vi_grab_avs && /tmp/vi_grab_avs -w 1920 -h 1080 -n 1 -v"
+```
+
 ---
 
 ## Три пути стерео-склейки на RV1126B (сводка)
