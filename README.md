@@ -730,6 +730,94 @@ grep enable_npu /etc/rkipc/*.ini          # включён ли NPU в rkipc
 
 ---
 
+## CLI: vi_grab_frame — сохранение кадра в файл
+
+В `app/vi_grab_frame/` есть минимальная CLI-программа, которая получает кадр с камеры через MPI и сохраняет его в файл как raw NV12. Основано на паттерне из rkipc (см. выше).
+
+### Использование
+
+```bash
+# Один кадр 1920x1080 → 1920x1080_nv12.raw
+./vi_grab_frame -w 1920 -h 1080
+
+# Один кадр 2560x1440 с канала 4 (как в rkipc для NPU)
+./vi_grab_frame -w 2560 -h 1440 -c 4 -o frame.raw
+
+# 10 кадров, каждый в отдельный файл: frame.raw_0000.raw, frame.raw_0001.raw, ...
+./vi_grab_frame -w 640 -h 360 -c 4 -n 10 -o frame.raw -v
+
+# Подробный вывод
+./vi_grab_frame -w 1920 -h 1080 -v
+```
+
+### Параметры
+
+| Параметр | Описание | По умолчанию |
+|----------|----------|:---:|
+| `-w, --width` | ширина кадра (обязательно) | — |
+| `-h, --height` | высота кадра (обязательно) | — |
+| `-d, --dev` | VI device id | 0 |
+| `-p, --pipe` | VI pipe id (= dev) | 0 |
+| `-c, --channel` | VI channel id | 0 |
+| `-o, --output` | имя файла | `<w>x<h>_nv12.raw` |
+| `-n, --count` | сколько кадров | 1 |
+| `-t, --timeout` | таймаут GetChnFrame, мс | 1000 |
+| `-v, --verbose` | подробный вывод | нет |
+
+### Сборка
+
+```bash
+# На Linux-машине с toolchain aarch64:
+cd app/vi_grab_frame
+mkdir build && cd build
+
+# Для arm64 (RV1126B 64-bit):
+cmake -DTARGET_ARCH=arm64 -DTARGET_CHIP=rv1126b ..
+make
+
+# Для arm (RV1126B 32-bit):
+cmake -DTARGET_ARCH=arm -DTARGET_CHIP=rv1126b ..
+make
+
+# Для cross-compile раскомментировать в CMakeLists.txt:
+#   set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+```
+
+### Что делает программа
+
+1. `RK_MPI_SYS_Init()` — инициализация MPI
+2. `RK_MPI_VI_SetDevAttr` + `RK_MPI_VI_EnableDev` — настройка VI устройства
+3. `RK_MPI_VI_SetChnAttr` + `RK_MPI_VI_EnableChn` — настройка VI канала (NV12, DMABUF)
+4. `RK_MPI_VI_GetChnFrame` — получение кадра
+5. `RK_MPI_MB_Handle2VirAddr` — виртуальный адрес данных
+6. `fwrite()` — запись в файл (NV12: `w*h*3/2` байт)
+7. `RK_MPI_VI_ReleaseChnFrame` — освобождение кадра
+8. `RK_MPI_VI_DisableChn` + `RK_MPI_VI_DisableDev` + `RK_MPI_SYS_Exit` — очистка
+
+### Просмотр сохранённого файла
+
+```bash
+# На Linux: конвертация NV12 в PNG через ffmpeg
+ffmpeg -pix_fmt nv12 -s 1920x1080 -i 1920x1080_nv12.raw -f image2 frame.png
+
+# Или через gst-launch (GStreamer)
+gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
+  rawvideoparse format=nv12 width=1920 height=1080 ! \
+  videoconvert ! pngenc ! filesink location=frame.png
+
+# Размер файла: w*h*3/2 (NV12)
+# 1920x1080: 3110400 байт
+# 2560x1440: 5529600 байт
+# 640x360:   345600 байт
+```
+
+### Файлы
+
+- `app/vi_grab_frame/vi_grab_frame.c` — исходник (~250 строк)
+- `app/vi_grab_frame/CMakeLists.txt` — сборка
+
+---
+
 ## Сборка
 
 ```bash
