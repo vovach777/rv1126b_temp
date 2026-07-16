@@ -927,6 +927,172 @@ make
 
 ---
 
+## Аппаратное сшивание двух камер в один кадр (AVS)
+
+### Ответ: ДА, и это не RGA — это AVS
+
+В rockit есть **AVS (Auto Video Stitching)** — отдельный аппаратный блок MPI, специально созданный для сшивания кадров с нескольких камер. Это **не RGA** и **не софтверный blend** — это dedicated hardware.
+
+Ключевое: у AVS есть флаг **`bSyncPipe`** — аппаратная синхронизация пайпов. Когда `bSyncPipe = 1`, AVS **ждёт кадры с обоих сенсоров** и обрабатывает их как пару. Это не "захватить потом склеить" — это аппаратная синхронизация на уровне модуля.
+
+### Режимы AVS (`rk_comm_avs.h`)
+
+| `AVS_MODE_*` | Значение | Что делает |
+|---|:---:|---|
+| `AVS_MODE_BLEND` | 0 | Сшивание с blend по LUT (требует калибровки) |
+| `AVS_MODE_NOBLEND_VER` | 1 | **Кадры вертикально друг под другом, без blend** |
+| `AVS_MODE_NOBLEND_HOR` | 2 | **Кадры горизонтально рядом, без blend** ← мега-кадр |
+| `AVS_MODE_NOBLEND_QR` | 3 | 2x2 сетка (4 камеры) |
+| `AVS_MODE_NOBLEND_OVL` | 4 | Overlay |
+| `AVS_MODE_BLEND_DYN` | 5 | Динамический blend |
+| `AVS_MODE_BLEND_JSON` | 6 | Blend по JSON-калибровке |
+
+Для **мега-кадра без калибровки** — `AVS_MODE_NOBLEND_HOR` (2) или `AVS_MODE_NOBLEND_VER` (1). Эти режимы просто помещают кадры рядом без геометрической коррекции. Калибровка не нужна.
+
+### Сравнение: AVS vs RGA vs pthread_barrier
+
+| | `vi_grab_dual` (pthread) | RGA blit | **AVS** |
+|---|---|---|---|
+| **Синхронизация** | софтверная (barrier) | нет | **аппаратная (`bSyncPipe`)** |
+| **Латентность** | ~1-5ms (CPU) | ~1-3ms (RGA) | **минимальная (hardware)** |
+| **Склейка** | нет (2 файла) | да (софтверный вызов) | **да (внутри пайплайна)** |
+| **Zero-copy** | да | да | **да (внутри MPI)** |
+| **CPU нагрузка** | 2 потока | 1 вызов | **0 (hardware)** |
+| **Калибровка** | не нужна | не нужна | для NOBLEND — не нужна |
+| **Вывод** | 2 файла | 1 буфер | **1 кадр из `AVS_GetChnFrame`** |
+
+### Архитектура AVS-пайплайна
+
+```
+Sensor 0 → VI dev 0 → VI pipe 0 ─┐
+                                  ├──► AVS Grp 0 ──► AVS chn 0 ──► мега-кадр (2W x H)
+Sensor 1 → VI dev 1 → VI pipe 1 ─┘    bSyncPipe=1       NOBLEND_HOR
+                                       u32PipeNum=2
+```
+
+AVS имеет:
+- **Group** (`AVS_GRP`) — содержит до 6 пайпов
+- **Pipes** (`AVS_PIPE` 0..5) — входы для каждого сенсора
+- **Channels** (`AVS_CHN` 0..N) — выходы мега-кадра (можно несколько разрешений)
+
+### Реальный код из rkipc dual_ipc
+
+`rkipc_avs_init()` (`app/rkipc/src/rv1126b_dual_ipc/video/video.c:322-481`):
+
+```c
+int rkipc_avs_init() {
+    AVS_GRP s32GrpId = 0;
+    AVS_GRP_ATTR_S stAvsGrpAttr;
+    AVS_CHN_ATTR_S stAvsChnAttr[4];
+
+    memset(&stAvsGrpAttr, 0, sizeof(stAvsGrpAttr));
+
+    // Режим: NOBLEND_HOR = 2 (мега-кадр горизонтально)
+    stAvsGrpAttr.enMode = rk_param_get_int("avs:avs_mode", 0);
+
+    // Калибровка (для NOBLEND не нужна, но код требует)
+    stAvsGrpAttr.stInAttr.enParamSource = AVS_PARAM_SOURCE_CALIB;
+    stAvsGrpAttr.stInAttr.stCalib.pCalibFilePath =
+        "/oem/usr/share/avs_calib/calib_file.xml";
+
+    stAvsGrpAttr.u32PipeNum = 2;                              // 2 сенсора
+    stAvsGrpAttr.bSyncPipe = rk_param_get_int("avs:sync", 1); // ← АППАРАТНАЯ СИНХРОНИЗАЦИЯ
+    stAvsGrpAttr.stGainAttr.enMode = AVS_GAIN_MODE_AUTO;
+    stAvsGrpAttr.stOutAttr.enPrjMode = AVS_PROJECTION_EQUIRECTANGULAR;
+
+    stAvsGrpAttr.stInAttr.stSize.u32Width  = 1920;  // avs:source_width
+    stAvsGrpAttr.stInAttr.stSize.u32Height = 1080;  // avs:source_height
+    stAvsGrpAttr.stOutAttr.fDistance = 5;
+
+    RK_MPI_AVS_SetModParam(&stAvsModParam);
+    RK_MPI_AVS_CreateGrp(s32GrpId, &stAvsGrpAttr);
+
+    // Канал 0 — основной выход мега-кадра
+    stAvsChnAttr[0].u32Width  = 3840;  // 2 × 1920 (мега-кадр)
+    stAvsChnAttr[0].u32Height = 1080;
+    stAvsChnAttr[0].enCompressMode = COMPRESS_MODE_NONE;
+    stAvsChnAttr[0].enDynamicRange = DYNAMIC_RANGE_SDR8;
+    stAvsChnAttr[0].u32FrameBufCnt = 2;
+    RK_MPI_AVS_SetChnAttr(s32GrpId, 0, &stAvsChnAttr[0]);
+    RK_MPI_AVS_EnableChn(s32GrpId, 0);
+
+    RK_MPI_AVS_StartGrp(s32GrpId);
+    return 0;
+}
+```
+
+**Конфиг INI** (`rkipc-dual-800w.ini`):
+
+```ini
+[avs]
+sensor_num = 2
+source_width = 1920
+source_height = 1080
+avs_mode = 2          ; 2 = NOBLEND_HOR (мега-кадр горизонтально)
+sync = 1              ; ← АППАРАТНАЯ СИНХРОНИЗАЦИЯ ВКЛЮЧЕНА
+param_source = 1      ; 1 = CALIB (для NOBLEND можно dummy)
+calib_file_path = /oem/usr/share/avs_calib/calib_file.xml
+stitch_distance = 5
+```
+
+### Получение мега-кадра
+
+```c
+// После инициализации AVS и привязки VI → AVS:
+VIDEO_FRAME_INFO_S stMegaFrame;
+RK_MPI_AVS_GetChnFrame(0, 0, &stMegaFrame, 1000);
+// stMegaFrame.stVFrame.u32Width  = 3840  (2 × 1920)
+// stMegaFrame.stVFrame.u32Height = 1080
+// stMegaFrame.stVFrame.u64PTS    — единая PTS для обоих сенсоров
+
+void *data = RK_MPI_MB_Handle2VirAddr(stMegaFrame.stVFrame.pMbBlk);
+// data содержит мега-кадр: [sensor0 | sensor1] side-by-side, NV12
+
+// Сохранить
+FILE *fp = fopen("mega_3840x1080_nv12.raw", "wb");
+fwrite(data, 1, 3840 * 1080 * 3 / 2, fp);
+fclose(fp);
+
+RK_MPI_AVS_ReleaseChnFrame(0, 0, &stMegaFrame);
+```
+
+### Нюансы
+
+1. **Кадры в AVS попадают через `RK_MPI_SYS_Bind`** (VI → AVS) или вручную через `RK_MPI_AVS_SendPipeFrame`. В rkipc dual_ipc bind VI→AVS **закомментирован** (строка 536) — потому что в их сценарии AVS используется только для IVS/NPU, а VENC получает кадры напрямую из VI. Для мега-кадра нужно раскомментировать.
+
+2. **Калибровка для NOBLEND**: режимы `NOBLEND_HOR`/`NOBLEND_VER` не делают геометрической коррекции, но код rkipc всё равно требует `AVS_PARAM_SOURCE_CALIB` с XML-файлом. Для простого склеивания можно попробовать dummy-файл или `AVS_PARAM_SOURCE_LUT` с пустой LUT.
+
+3. **Разрешение мега-кадра**: при `NOBLEND_HOR` ширина = `source_width × pipeNum`, высота = `source_height`. При `NOBLEND_VER` — наоборот.
+
+4. **`bSyncPipe = 1`** — это **блокирующая** синхронизация. AVS ждёт пока оба сенсора не дадут кадр, потом склеивает. Если один сенсор отстаёт — весь пайплайн ждёт. Это гарантирует минимальную разницу PTS.
+
+5. **AVS — аппаратный блок**, не использует CPU. Латентность — это только время DMA-передачи + hardware stitch. "Наносекунд" не будет (DMA + memory bandwidth), но **микросекунды** — реально.
+
+### Почему не RGA?
+
+RGA может склеить два кадра (blit side-by-side), но:
+- RGA не имеет **синхронизации** — вы сами должны гарантировать что оба кадра готовы
+- RGA — это **отдельный вызов** вне пайплайна: GetFrame → RGA blit → результат
+- AVS — **внутри пайплайна**: VI → AVS → VENC/VO, с auto-sync
+
+RGA имеет смысл если:
+- AVS недоступен на вашем чипе
+- Нужна нестандартная компоновка (overlay, picture-in-picture)
+- Нужна color correction / blend между кадрами
+
+### CLI: vi_grab_avs (TODO)
+
+Можно сделать CLI-программу `vi_grab_avs` которая:
+1. Инициализирует 2 VI канала
+2. Инициализирует AVS в режиме `NOBLEND_HOR` + `bSyncPipe=1`
+3. Bind VI → AVS
+4. Получает мега-кадр из `RK_MPI_AVS_GetChnFrame`
+5. Сохраняет в файл `mega_<W>x<H>_pts<PTS>_nv12.raw`
+
+Если нужно — создайте [Issue](https://github.com/vovach777/rv1126b_temp/issues) с пометкой "vi_grab_avs".
+
+---
+
 ## Сборка
 
 ```bash
