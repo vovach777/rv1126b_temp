@@ -1,0 +1,76 @@
+diff --git a/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_0.ini b/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_0.ini
+index 455521a11..44fe3cba6 100644
+--- a/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_0.ini
++++ b/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_0.ini
+@@ -239,7 +239,7 @@ aq_step_p                      = NONE
+ [display]
+ x                              = 0
+ y                              = 0
+-width                          = 1080
++width                          = 540
+ height                         = 1920
+ rotation                       = 1
+ vpss_grp                       = 1
+diff --git a/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_1.ini b/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_1.ini
+index 281ea3872..cfe793016 100644
+--- a/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_1.ini
++++ b/app/rkadk/inicfg/rv1126b/rkadk_defsetting_sensor_1.ini
+@@ -237,9 +237,9 @@ aq_step_p                      = NONE
+ 
+ 
+ [display]
+-x                              = 0
++x                              = 540
+ y                              = 0
+-width                          = 1080
++width                          = 540
+ height                         = 1920
+ rotation                       = 1
+ vpss_grp                       = 3
+@@ -249,7 +249,7 @@ intf_type                      = MIPI
+ splice_mode                    = RGA
+ vo_device                      = 0
+ vo_layer                       = 0
+-vo_chn                         = 0
++vo_chn                         = 1
+ frame_rate                     = 30
+ layer_buflen                   = 3
+ 
+diff --git a/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_0.ini b/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_0.ini
+index 455521a11..44fe3cba6 100644
+--- a/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_0.ini
++++ b/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_0.ini
+@@ -239,7 +239,7 @@ aq_step_p                      = NONE
+ [display]
+ x                              = 0
+ y                              = 0
+-width                          = 1080
++width                          = 540
+ height                         = 1920
+ rotation                       = 1
+ vpss_grp                       = 1
+diff --git a/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_1.ini b/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_1.ini
+index 281ea3872..cfe793016 100644
+--- a/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_1.ini
++++ b/app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_1.ini
+@@ -237,9 +237,9 @@ aq_step_p                      = NONE
+ 
+ 
+ [display]
+-x                              = 0
++x                              = 540
+ y                              = 0
+-width                          = 1080
++width                          = 540
+ height                         = 1920
+ rotation                       = 1
+ vpss_grp                       = 3
+@@ -249,7 +249,7 @@ intf_type                      = MIPI
+ splice_mode                    = RGA
+ vo_device                      = 0
+ vo_layer                       = 0
+-vo_chn                         = 0
++vo_chn                         = 1
+ frame_rate                     = 30
+ layer_buflen                   = 3
+ 

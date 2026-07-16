@@ -256,4 +256,19 @@ endif()
 target_include_directories(rkadk_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(rkadk_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/examples/common)
 install(TARGETS rkadk_ui_test DESTINATION "bin")
+
+#--------------------------
+# rkadk_dual_disp_test
+#--------------------------
+add_executable(rkadk_dual_disp_test rkadk_dual_disp_test.c ${ISP_SRC})
+add_dependencies(rkadk_dual_disp_test rkadk)
+target_link_libraries(rkadk_dual_disp_test rkadk)
+
+if(USE_RKAIQ)
+	target_link_libraries(rkadk_dual_disp_test rkaiq)
+endif()
+
+target_include_directories(rkadk_dual_disp_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(rkadk_dual_disp_test PRIVATE ${CMAKE_SOURCE_DIR}/examples/common)
+install(TARGETS rkadk_dual_disp_test DESTINATION "bin")
 endif()

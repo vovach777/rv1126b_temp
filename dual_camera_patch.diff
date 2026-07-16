@@ -1,0 +1,164 @@
+diff --git a/app/rkadk/examples/CMakeLists.txt b/app/rkadk/examples/CMakeLists.txt
+index 1c48382d2..cbae7202b 100644
+--- a/app/rkadk/examples/CMakeLists.txt
++++ b/app/rkadk/examples/CMakeLists.txt
+@@ -256,4 +256,19 @@ endif()
+ target_include_directories(rkadk_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+ target_include_directories(rkadk_ui_test PRIVATE ${CMAKE_SOURCE_DIR}/examples/common)
+ install(TARGETS rkadk_ui_test DESTINATION "bin")
++
++#--------------------------
++# rkadk_dual_disp_test
++#--------------------------
++add_executable(rkadk_dual_disp_test rkadk_dual_disp_test.c ${ISP_SRC})
++add_dependencies(rkadk_dual_disp_test rkadk)
++target_link_libraries(rkadk_dual_disp_test rkadk)
++
++if(USE_RKAIQ)
++	target_link_libraries(rkadk_dual_disp_test rkaiq)
++endif()
++
++target_include_directories(rkadk_dual_disp_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
++target_include_directories(rkadk_dual_disp_test PRIVATE ${CMAKE_SOURCE_DIR}/examples/common)
++install(TARGETS rkadk_dual_disp_test DESTINATION "bin")
+ endif()
+diff --git a/app/rkadk/inicfg/rv1106_1103/rkadk_defsetting_sensor_1.ini b/app/rkadk/inicfg/rv1106_1103/rkadk_defsetting_sensor_1.ini
+index 9a719f6f1..4cfe79385 100644
+--- a/app/rkadk/inicfg/rv1106_1103/rkadk_defsetting_sensor_1.ini
++++ b/app/rkadk/inicfg/rv1106_1103/rkadk_defsetting_sensor_1.ini
+@@ -226,7 +226,7 @@ aq_step_p                      = NONE
+ 
+ 
+ [display]
+-x                              = 0
++x                              = 320
+ y                              = 0
+ width                          = 320
+ height                         = 480
+@@ -238,7 +238,7 @@ intf_type                      = default
+ splice_mode                    = RGA
+ vo_device                      = 0
+ vo_layer                       = 0
+-vo_chn                         = 0
++vo_chn                         = 1
+ frame_rate                     = 30
+ layer_buflen                   = 3
+ 
+diff --git a/app/rkadk/inicfg/rv1106_1103/rkadk_setting_sensor_1.ini b/app/rkadk/inicfg/rv1106_1103/rkadk_setting_sensor_1.ini
+index 9a719f6f1..4cfe79385 100644
+--- a/app/rkadk/inicfg/rv1106_1103/rkadk_setting_sensor_1.ini
++++ b/app/rkadk/inicfg/rv1106_1103/rkadk_setting_sensor_1.ini
+@@ -226,7 +226,7 @@ aq_step_p                      = NONE
+ 
+ 
+ [display]
+-x                              = 0
++x                              = 320
+ y                              = 0
+ width                          = 320
+ height                         = 480
+@@ -238,7 +238,7 @@ intf_type                      = default
+ splice_mode                    = RGA
+ vo_device                      = 0
+ vo_layer                       = 0
+-vo_chn                         = 0
++vo_chn                         = 1
+ frame_rate                     = 30
+ layer_buflen                   = 3
+ 
+diff --git a/app/rkadk/src/display/rkadk_disp.c b/app/rkadk/src/display/rkadk_disp.c
+index ff435ab84..b6fcb52c9 100644
+--- a/app/rkadk/src/display/rkadk_disp.c
++++ b/app/rkadk/src/display/rkadk_disp.c
+@@ -30,8 +30,9 @@ typedef struct {
+   pthread_t tid; //send frame to vo thread
+ } RKADK_DISP_HANDLE_S;
+ 
+-static RKADK_DISP_HANDLE_S stDispHandle = {
+-    .bInit = false, .u32CamId = 0, .bSendBuffer = false, .tid= 0};
++static RKADK_DISP_HANDLE_S stDispHandle[RKADK_MAX_SENSOR_CNT] = {
++    [0 ... RKADK_MAX_SENSOR_CNT - 1] = {
++        .bInit = false, .u32CamId = 0, .bSendBuffer = false, .tid = 0}};
+ 
+ static int RKADK_DISP_CreateVo(RKADK_U32 VoLayer, RKADK_U32 VoDev,
+                                RKADK_PARAM_DISP_CFG_S *pstDispCfg) {
+@@ -275,7 +276,7 @@ RKADK_S32 RKADK_DISP_Init(RKADK_U32 u32CamId) {
+ 
+   RKADK_CHECK_CAMERAID(u32CamId, RKADK_FAILURE);
+ 
+-  if (stDispHandle.bInit) {
++  if (stDispHandle[u32CamId].bInit) {
+     RKADK_LOGI("Disp u32CamId[%d] has been initialized", u32CamId);
+     return 0;
+   }
+@@ -311,18 +312,18 @@ RKADK_S32 RKADK_DISP_Init(RKADK_U32 u32CamId) {
+     goto failed;
+   }
+ 
+-  stDispHandle.u32CamId = u32CamId;
++  stDispHandle[u32CamId].u32CamId = u32CamId;
+ #if defined(RV1106_1103) || defined(RV1103B)
+   char name[RKADK_THREAD_NAME_LEN];
+-  stDispHandle.bSendBuffer = true;
+-  ret = pthread_create(&stDispHandle.tid, NULL,
+-                       RKADK_DISP_GetVpssMb, &stDispHandle);
++  stDispHandle[u32CamId].bSendBuffer = true;
++  ret = pthread_create(&stDispHandle[u32CamId].tid, NULL,
++                       RKADK_DISP_GetVpssMb, &stDispHandle[u32CamId]);
+   if (ret) {
+     RKADK_LOGE("Create get vpss mb(%d) thread failed %d", stSrcVpssChn.s32ChnId, ret);
+     goto failed;
+   }
+   snprintf(name, sizeof(name), "GetVpssMb_%d", stSrcVpssChn.s32ChnId);
+-  pthread_setname_np(stDispHandle.tid, name);
++  pthread_setname_np(stDispHandle[u32CamId].tid, name);
+ #else
+   // Bind VPSS to VO
+   ret = RKADK_MPI_SYS_Bind(&stSrcVpssChn, &stVoChn);
+@@ -341,7 +342,7 @@ RKADK_S32 RKADK_DISP_Init(RKADK_U32 u32CamId) {
+     goto failed;
+   }
+ 
+-  stDispHandle.bInit = true;
++  stDispHandle[u32CamId].bInit = true;
+   RKADK_LOGI("Disp u32CamId[%d] Init End...", u32CamId);
+   return 0;
+ 
+@@ -365,7 +366,7 @@ RKADK_S32 RKADK_DISP_DeInit(RKADK_U32 u32CamId) {
+ 
+   RKADK_CHECK_CAMERAID(u32CamId, RKADK_FAILURE);
+ 
+-  if (!stDispHandle.bInit || stDispHandle.u32CamId != u32CamId) {
++  if (!stDispHandle[u32CamId].bInit || stDispHandle[u32CamId].u32CamId != u32CamId) {
+     RKADK_LOGE("Disp u32CamId[%d] not initialized", u32CamId);
+     return -1;
+   }
+@@ -382,15 +383,15 @@ RKADK_S32 RKADK_DISP_DeInit(RKADK_U32 u32CamId) {
+                     &stVoChn, &stSrcVpssChn, &stDstVpssChn);
+ 
+ #if defined(RV1106_1103) || defined(RV1103B)
+-  stDispHandle.bSendBuffer = false;
+-  if (stDispHandle.tid) {
++  stDispHandle[u32CamId].bSendBuffer = false;
++  if (stDispHandle[u32CamId].tid) {
+     RKADK_LOGD("Request to cancel get mb thread...");
+-    ret = pthread_join(stDispHandle.tid, NULL);
++    ret = pthread_join(stDispHandle[u32CamId].tid, NULL);
+     if (ret)
+       RKADK_LOGE("Exit get vpss[%d] mb thread failed!", stSrcVpssChn.s32ChnId);
+     else
+       RKADK_LOGI("Exit get vpss[%d] mb thread ok", stSrcVpssChn.s32ChnId);
+-    stDispHandle.tid = 0;
++    stDispHandle[u32CamId].tid = 0;
+   }
+ #else
+   // VPSS UnBind VO
+@@ -428,7 +429,7 @@ RKADK_S32 RKADK_DISP_DeInit(RKADK_U32 u32CamId) {
+     return ret;
+   }
+ 
+-  stDispHandle.bInit = false;
++  stDispHandle[u32CamId].bInit = false;
+   RKADK_LOGI("Disp u32CamId[%d] DeInit End...", u32CamId);
+   return 0;
+ }
