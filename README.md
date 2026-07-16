@@ -1226,7 +1226,22 @@ Frame 0: 3840x1080 pts=8420618673us grab=168ms → mega_3840x1080_pts8420618673_
 - **PTS**: 8420618673us (единая для обоих сенсоров!)
 - **Время захвата**: 168ms (включая sync wait + hardware stitch)
 - **Синхронизация**: `bSyncPipe=1` — аппаратная
-- **ISP warmup**: для реального изображения (не тест-паттерна) нужно сначала запустить `rkipc` на 5 секунд, чтобы `rk_aiq` применил IQ-калибровку (`/etc/iqfiles/gc2093_*.json`)
+- **ISP warmup (ВАЖНО)**: `vi_grab_avs` не инициализирует `rk_aiq` (нет заголовков `rk_aiq_user_api2_*.h` в SDK). Без warmup сенсоры выдают тест-паттерн (чёрный/белый). Для реального изображения нужно:
+  1. Остановить `rkaiq_3A_server` (он блокирует сенсор): `/etc/init.d/S40rkaiq_3A stop`
+  2. Запустить `rkipc` на 5-8 секунд (инициализирует `rk_aiq` с IQ-файлами `/etc/iqfiles/gc2093_*.json` для обоих сенсоров)
+  3. Остановить `rkipc` — ISP остаётся «тёплым» (калибровка в регистрах)
+  4. Запустить `vi_grab_avs` — подхватывает уже настроенный пайплайн
+  5. Перезапустить `rkaiq_3A_server`: `/etc/init.d/S40rkaiq_3A start`
+
+  ```bash
+  /etc/init.d/S40rkaiq_3A stop
+  /usr/bin/rkipc -c /usr/share/rkipc-dual-800w.ini -l 0 &
+  RKP=$!; sleep 8; kill $RKP; wait $RKP 2>/dev/null
+  /tmp/vi_grab_avs -w 1920 -h 1080 -n 3 -v -t 15000
+  /etc/init.d/S40rkaiq_3A start
+  ```
+
+  Альтернатива: на плате есть готовый `/usr/bin/simple_vi_bind_avs_bind_venc` — он **сам** инициализирует `rk_aiq` и делает VI→AVS→VENC (H.264), но не сохраняет raw NV12.
 
 Топология камеры на плате:
 ```
