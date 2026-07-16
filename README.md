@@ -743,7 +743,10 @@ grep enable_npu /etc/rkipc/*.ini          # включён ли NPU в rkipc
 # Один кадр 2560x1440 с канала 4 (как в rkipc для NPU)
 ./vi_grab_frame -w 2560 -h 1440 -c 4 -o frame.raw
 
-# 10 кадров, каждый в отдельный файл: frame.raw_0000.raw, frame.raw_0001.raw, ...
+# 10 кадров, каждый в отдельный файл с PTS в имени:
+#   frame.raw_pts12345678_0000.raw
+#   frame.raw_pts12345700_0001.raw
+#   ...
 ./vi_grab_frame -w 640 -h 360 -c 4 -n 10 -o frame.raw -v
 
 # Подробный вывод
@@ -828,8 +831,8 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 ```bash
 # Одновременный захват с двух сенсоров (1920x1080 каждый)
 ./vi_grab_dual -w 1920 -h 1080
-# → sensor0_1920x1080_nv12.raw
-# → sensor1_1920x1080_nv12.raw
+# → sensor0_1920x1080_pts12345678_nv12.raw
+# → sensor1_1920x1080_pts12345690_nv12.raw
 
 # Разные разрешения для каждого сенсора
 ./vi_grab_dual -w 1920 -h 1080 -W 640 -H 360
@@ -839,8 +842,8 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 
 # Свой префикс имени файла
 ./vi_grab_dual -w 1920 -h 1080 -o cam
-# → cam0_1920x1080_nv12.raw
-# → cam1_1920x1080_nv12.raw
+# → cam0_1920x1080_pts12345678_nv12.raw
+# → cam1_1920x1080_pts12345690_nv12.raw
 ```
 
 ### Параметры
@@ -862,12 +865,16 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 Программа выводит для каждой пары кадров:
 ```
 Frame 0: s0=1920x1080 s1=1920x1080 PTS_diff=120us (0.12ms) total=45ms
-  → sensor0_1920x1080_nv12.raw
-  → sensor1_1920x1080_nv12.raw
+  → sensor0_1920x1080_pts12345678_nv12.raw
+  → sensor1_1920x1080_pts12345690_nv12.raw
 ```
 
+- **PTS** — временная метка кадра в микросекундах, записана в имя файла. Позволяет точно сопоставить кадры с двух сенсоров.
 - **PTS_diff** — разница временных меток кадров (в микросекундах). Чем меньше, тем синхроннее сенсоры. На RV1126B с двумя сенсорами обычно < 1ms.
 - **total** — время захвата пары кадров.
+
+> Имя файла: `<prefix><sensor>_<W>x<H>_pts<PTS_us>_nv12.raw`
+> Пример: `sensor0_1920x1080_pts12345678_nv12.raw`
 
 ### Как это работает
 

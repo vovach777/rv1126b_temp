@@ -269,14 +269,14 @@ int main(int argc, char **argv) {
         int w = stViFrame.stVFrame.u32Width;
         int h = stViFrame.stVFrame.u32Height;
         int seq = stViFrame.stVFrame.u32TimeRef;
-        long long pts = (long long)stViFrame.stVFrame.u64PTS / 1000;
+        long long pts_us = (long long)stViFrame.stVFrame.u64PTS;
 
         if (ctx.verbose) {
-            printf("Frame %d: %dx%d, seq=%d, pts=%lldms, len=%d, data=%p\n",
-                   i, w, h, seq, pts, data_len, data);
+            printf("Frame %d: %dx%d, seq=%d, pts=%lldus (%lldms), len=%d, data=%p\n",
+                   i, w, h, seq, pts_us, pts_us / 1000, data_len, data);
         }
 
-        /* 5. Сохранение в файл */
+        /* 5. Сохранение в файл (имя включает PTS) */
         if (ctx.frameCount == 1) {
             /* Один кадр — пишем в указанный файл */
             FILE *fp = fopen(ctx.outputFile, "wb");
@@ -288,13 +288,14 @@ int main(int argc, char **argv) {
                 int to_write = (data_len > 0) ? data_len : expected;
                 size_t written = fwrite(data, 1, to_write, fp);
                 fclose(fp);
-                printf("Saved %zu bytes to %s (%dx%d NV12, expected %d)\n",
-                       written, ctx.outputFile, w, h, expected);
+                printf("Saved %zu bytes to %s (%dx%d NV12, PTS=%lldus, expected %d)\n",
+                       written, ctx.outputFile, w, h, pts_us, expected);
             }
         } else {
-            /* Несколько кадров — каждый в свой файл */
+            /* Несколько кадров — каждый в свой файл с PTS в имени */
             char fname[300];
-            snprintf(fname, sizeof(fname), "%s_%04d.raw", ctx.outputFile, i);
+            snprintf(fname, sizeof(fname), "%s_pts%lld_%04d.raw",
+                     ctx.outputFile, pts_us, i);
             FILE *fp = fopen(fname, "wb");
             if (!fp) {
                 fprintf(stderr, "Cannot open %s for writing\n", fname);
@@ -304,7 +305,7 @@ int main(int argc, char **argv) {
                 size_t written = fwrite(data, 1, to_write, fp);
                 fclose(fp);
                 if (ctx.verbose)
-                    printf("Saved %zu bytes to %s\n", written, fname);
+                    printf("Saved %zu bytes to %s (PTS=%lldus)\n", written, fname, pts_us);
             }
         }
 

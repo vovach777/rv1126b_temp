@@ -217,9 +217,9 @@ static void *grab_thread(void *arg) {
                 s->devId, s->frame_width, s->frame_height, s->pts_us, s->data_len);
     }
 
-    /* Сохранение в файл */
-    snprintf(s->saved_file, sizeof(s->saved_file), "%s%d_%dx%d_nv12.raw",
-             app->outputPrefix, s->devId, s->frame_width, s->frame_height);
+    /* Сохранение в файл (имя включает PTS) */
+    snprintf(s->saved_file, sizeof(s->saved_file), "%s%d_%dx%d_pts%lld_nv12.raw",
+             app->outputPrefix, s->devId, s->frame_width, s->frame_height, s->pts_us);
     FILE *fp = fopen(s->saved_file, "wb");
     if (!fp) {
         fprintf(stderr, "[sensor %d] cannot open %s\n", s->devId, s->saved_file);
@@ -231,8 +231,8 @@ static void *grab_thread(void *arg) {
         fclose(fp);
         s->save_ok = 1;
         if (s->verbose)
-            fprintf(stderr, "[sensor %d] saved %zu bytes to %s\n",
-                    s->devId, written, s->saved_file);
+            fprintf(stderr, "[sensor %d] saved %zu bytes to %s (PTS=%lldus)\n",
+                    s->devId, written, s->saved_file, s->pts_us);
     }
 
     /* Освобождение кадра */
