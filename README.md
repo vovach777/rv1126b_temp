@@ -813,7 +813,8 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 
 - `app/vi_grab_frame/vi_grab_frame.c` — один сенсор (~250 строк)
 - `app/vi_grab_frame/vi_grab_dual.c` — два сенсора одновременно (~300 строк)
-- `app/vi_grab_frame/CMakeLists.txt` — сборка обеих программ
+- `app/vi_grab_frame/vi_grab_avs.c` — **аппаратное сшивание через AVS** (~400 строк)
+- `app/vi_grab_frame/CMakeLists.txt` — сборка всех трёх программ
 
 ## CLI: vi_grab_dual — одновременный захват с двух сенсоров
 
@@ -901,6 +902,23 @@ cmake -DTARGET_CHIP=rv1126b ..
 make
 
 # Обе программы соберутся: vi_grab_frame и vi_grab_dual
+```
+
+### Сборка vi_grab_avs
+
+`vi_grab_avs` собирается в том же каталоге:
+
+```bash
+cd app/vi_grab_frame
+mkdir build && cd build
+
+cmake -DTARGET_CHIP=rv1126b ..
+make vi_grab_avs
+
+# Все три программы:
+#   vi_grab_frame  — один сенсор
+#   vi_grab_dual   — два сенсора (pthread sync)
+#   vi_grab_avs    — два сенсора (AVS hardware stitch)
 ```
 
 ### Если не работает
@@ -1080,16 +1098,101 @@ RGA имеет смысл если:
 - Нужна нестандартная компоновка (overlay, picture-in-picture)
 - Нужна color correction / blend между кадрами
 
-### CLI: vi_grab_avs (TODO)
+### CLI: vi_grab_avs — готово!
 
-Можно сделать CLI-программу `vi_grab_avs` которая:
-1. Инициализирует 2 VI канала
-2. Инициализирует AVS в режиме `NOBLEND_HOR` + `bSyncPipe=1`
-3. Bind VI → AVS
-4. Получает мега-кадр из `RK_MPI_AVS_GetChnFrame`
-5. Сохраняет в файл `mega_<W>x<H>_pts<PTS>_nv12.raw`
+`vi_grab_avs` — CLI-программа которая делает всё описанное выше: инициализирует 2 VI канала, AVS с `bSyncPipe=1` + `NOBLEND_HOR`, bind VI→AVS, и получает мега-кадр из `RK_MPI_AVS_GetChnFrame`.
 
-Если нужно — создайте [Issue](https://github.com/vovach777/rv1126b_temp/issues) с пометкой "vi_grab_avs".
+#### Использование
+
+```bash
+# Мега-кадр 3840x1080 (2×1920x1080 горизонтально)
+./vi_grab_avs -w 1920 -h 1080
+# → mega_3840x1080_pts12345678_nv12.raw
+
+# 10 мега-кадров
+./vi_grab_avs -w 1920 -h 1080 -n 10
+
+# Вертикально (1920x2160)
+./vi_grab_avs -w 1920 -h 1080 -m ver
+
+# С калибровкой (blend режим)
+./vi_grab_avs -w 1920 -h 1080 -m blend --calib /oem/usr/share/avs_calib/calib_file.xml
+
+# Подробный вывод
+./vi_grab_avs -w 1920 -h 1080 -v
+```
+
+#### Параметры
+
+| Параметр | Описание | По умолчанию |
+|----------|----------|:---:|
+| `-w, --width` | ширина одного сенсора (обязательно) | — |
+| `-h, --height` | высота одного сенсора (обязательно) | — |
+| `-m, --mode` | режим AVS: `hor`, `ver`, `blend` | `hor` |
+| `-c, --channel` | VI channel id (0 = MAINPATH) | 0 |
+| `-o, --output` | префикс файла | `mega` |
+| `-n, --count` | сколько мега-кадров | 1 |
+| `-t, --timeout` | таймаут GetChnFrame, мс | 2000 |
+| `--calib <FILE>` | калибровочный XML (для blend) | — |
+| `--no-sync` | отключить `bSyncPipe` | нет |
+| `-v, --verbose` | подробный вывод | нет |
+
+#### Режимы AVS
+
+| `-m` | Константа | Размер мега-кадра | Калибровка |
+|------|-----------|-------------------|:---:|
+| `hor` | `NOBLEND_HOR` | 2W × H | не нужна |
+| `ver` | `NOBLEND_VER` | W × 2H | не нужна |
+| `blend` | `BLEND` | 2W × H | **нужна** (`--calib`) |
+
+#### Вывод
+
+```
+vi_grab_avs: 1920x1080 per sensor, mode=NOBLEND_HOR, sync=1, mega=3840x1080, frames=1
+Waiting for mega-frames (sync=1, this may take a few seconds)...
+Frame 0: 3840x1080 pts=12345678us grab=45ms → mega_3840x1080_pts12345678_nv12.raw (6220800 bytes)
+```
+
+- **PTS** — единая временная метка для обоих сенсоров (аппаратная синхронизация)
+- **grab** — время ожидания мега-кадра (включает sync wait + hardware stitch)
+
+#### Что делает программа
+
+1. `RK_MPI_SYS_Init()` — инициализация MPI
+2. Для каждого сенсора (0, 1):
+   - `RK_MPI_VI_SetDevAttr` + `EnableDev` + `SetDevBindPipe` — VI device
+   - `RK_MPI_VI_SetChnAttr` + `EnableChnExt` — VI channel (MAINPATH)
+3. `RK_MPI_VI_StartPipe` для каждого сенсора (group mode — все должны быть готовы)
+4. `RK_MPI_AVS_SetModParam` + `CreateGrp` — AVS group (`bSyncPipe=1`, `NOBLEND_HOR`)
+5. `RK_MPI_CAL_AVS_GetFinalLutBufferSize` + `CreateMB` + `GetFinalLut` — LDCH
+6. `RK_MPI_AVS_SetChnAttr` + `EnableChn` — AVS channel (мега-кадр 2W×H)
+7. `RK_MPI_SYS_Bind(VI → AVS)` для каждого сенсора
+8. `RK_MPI_AVS_StartGrp` — запуск AVS
+9. `RK_MPI_AVS_GetChnFrame` — получение мега-кадра (одно PTS для обоих сенсоров!)
+10. `fwrite()` — сохранение в файл
+11. Очистка: `UnBind` → `DisableChn` → `StopGrp` → `DestroyGrp` → `StopPipe` → `DisableChnExt` → `DisableDev` → `SYS_Exit`
+
+#### Просмотр мега-кадра
+
+```bash
+# Конвертация в PNG (горизонтальный мега-кадр 3840x1080)
+ffmpeg -pix_fmt nv12 -s 3840x1080 -i mega_3840x1080_pts12345678_nv12.raw -f image2 mega.png
+
+# Размер файла: 2W × H × 3/2 (NV12)
+# 3840x1080: 6220800 байт (2 × 1920×1080×1.5)
+# 1920x2160: 6220800 байт (вертикальный)
+```
+
+#### Нюансы
+
+- **Первый кадр может идти долго** (2-5 сек) — AVS ждёт пока оба сенсора прогреются и синхронизируются
+- **`bSyncPipe=1`** — если один сенсор отстаёт, весь пайплайн ждёт. Это гарантирует синхронность, но может вызвать timeout. Если таймаут — увеличьте `-t 5000`
+- **NOBLEND без калибровки** — программа пробует `AVS_PARAM_SOURCE_LUT` с пустой таблицей. Если `CreateGrp` падает, попробуйте `--calib /path/to/dummy.xml` (файл может быть пустым XML)
+- **LDCH** — программа выполняет `GetFinalLut` как rkipc, но для NOBLEND это может быть noop. Ошибки игнорируются
+
+#### Файлы
+
+- `app/vi_grab_frame/vi_grab_avs.c` — исходник (~400 строк)
 
 ---
 
