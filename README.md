@@ -347,109 +347,97 @@ RK_MPI_VPSS_ReleaseChnFrame(grp, chn, &stFrame);
 
 Это **не через ini** — это в C-коде. Вы прерываете пайплайн, забираете кадр, обрабатываете, возвращаете. Но это **zero-copy**: кадр лежит в DMA-памяти, NPU может работать с физическим адресом или dmabuf fd напрямую.
 
-### Подход 2: TGI (Task Graph Interface) — "высокоуровневый"
+### Подход 2: TGI (Task Graph Interface) — НЕ ДОСТУПЕН в этом SDK
 
-В `external/rockit/tgi/` есть **полноценный графовый движок** — `RTTaskGraph`. Это гораздо ближе к идее "описал граф — оно само работает":
+В `external/rockit/tgi/` есть заголовки графового движка `RTTaskGraph` и JSON-конфиги с NPU-узлами. Это реальная подсистема Rockchip, которая позволяет описывать пайплайны в JSON с узлами `rockx` (NPU), `rkrga` (RGA), `rkeptz` (AI PTZ) и др.
 
-```cpp
-// RTTaskGraph.h
-class RTTaskGraph {
-    RT_RET autoBuild(const char* config, RT_BOOL isFileType = RT_TRUE);
-    RT_RET prepare(RtMetaData *params);
-    RT_RET start();
-    RT_RET stop();
-    RTCBHandle observeOutputStream(string streamName,
-                                   function<RT_RET(RTMediaBuffer*)> callback);
-    RTTaskNode* createNode(string nodeConfig, string streamConfig);
-    RT_RET linkNode(RTTaskNode *src, RTTaskNode *dst);
-};
+**Но в этом SDK TGI не скомпилирован в `librockit.so`.** Проверка бинарников (поиск строк `RTTaskGraph`, `RTTaskNode`, `autoBuild`, `rockx`):
+
+| Строка | rv1126b arm64 | rv1126b arm | rk3588 | rv1106 full |
+|--------|:---:|:---:|:---:|:---:|
+| `RK_MPI` (MPI) | **FOUND** | **FOUND** | **FOUND** | **FOUND** |
+| `RTTaskGraph` (TGI) | NOTFOUND | NOTFOUND | NOTFOUND | NOTFOUND |
+| `rockx` | NOTFOUND | NOTFOUND | NOTFOUND | NOTFOUND |
+| `rknn` | FOUND | — | — | — |
+
+TGI отсутствует во **всех** `librockit.so` в SDK. Дополнительно, `RockitConfig.cmake` ссылается на `lib/lib64/librockit.so` — путь, которого не существует. Отдельной `libtgi.so` нет.
+
+Возможно TGI доступен в полном Rockchip SDK как отдельный пакет, или требует другой сборки `librockit.so`. Но в этом репо — **только MPI**.
+
+> **Справочно:** если бы TGI был доступен, граф описывался бы JSON-файлом с узлами типа `rockx` (NPU), `rkrga` (RGA). Пример из `aicamera_rockx.json`: `rkisp → rkzoom → rockx(face_detect) → rkeptz → rkrga → link_output`. Но это **не рабочий вариант** для данного SDK.
+
+### Подход 3: RockIva — готовый AI-движок rkipc (НЕ для своих моделей)
+
+На RV1126B в `rkipc` используется **RockIva** (`librockiva.so`) — высокоуровневая AI-библиотека для IPC. Она загружает предобученные `.rknn` модели из `/oem/usr/lib/` и предоставляет API для детекции объектов и анализа поведения (area invasion, tripwire).
+
+```ini
+# rkipc-2688x1520.ini
+[event.regional_invasion]
+rockiva_model_type = big          ; small | medium | big
+rockiva_model_path = /oem/usr/lib/
 ```
-
-Граф описывается **JSON-файлом**, а не ini. И вот там **есть NPU**:
-
-```json
-// aicamera_rockx.json — реальный пример из SDK
-"node_4": {
-    "node_opts": {
-        "node_name": "rockx"                    // ← NPU-узел!
-    },
-    "stream_opts": {
-        "stream_input":  "eptz_face_detect_in",
-        "stream_output": "eptz_face_detect_out",
-        "stream_fmt_in":  "image:nv12",
-        "stream_fmt_out": "image:rect"
-    },
-    "stream_opts_extra": {
-        "opt_rockx_model": "rockx_face_detect"  // ← модель RKNN
-    }
-}
-```
-
-Доступные node-типы (из JSON-конфигов):
-
-| node_name | Что делает |
-|-----------|-----------|
-| `rkisp` | ISP обработка |
-| `rkzoom` | Zoom контроль |
-| `rkrga` | **RGA** — scale/crop/rotate |
-| `rockx` | **NPU** — face detect, pose, landmark, gender/age |
-| `rkeptz` | AI-based EPTZ (электронный PTZ) |
-| `link_output` | Выход графа |
-| и др. | |
-
-#### Полный пайплайн из JSON (реальный пример)
-
-```
-rkisp → rkzoom → rockx(face_detect) → rkeptz → rkrga(scale) → link_output
-```
-
-Это именно то, что хочется: **кадр с камеры → RGA (scale) → NPU (inference) → результат**. И всё это декларативно в JSON.
-
-#### Что умеет rockx (NPU-узел)
-
-Из `RTMediaRockx.h`:
 
 ```c
-ROCKX_FACE_DETECT       // детекция лиц
-ROCKX_FACE_LANDMARK     // ключевые точки лица
-ROCKX_POSE_BODY         // поза тела
-ROCKX_POSE_BODY_V2      // поза тела v2
-ROCKX_POSE_FINGER       // жесты пальцами
-ROCKX_FACE_GENDER_AGE   // пол и возраст
+// rockiva.c — реальный код из rkipc
+globalParams.detModel |= ROCKIVA_DET_MODEL_CLS8;  // big = 8 классов
+// или
+globalParams.detModel |= ROCKIVA_DET_MODEL_PFP;   // small/medium = Person/Face/Pet
 ```
 
-Это предобученные модели через `librknn.so`. Для своих моделей нужен `rknn_api` напрямую.
+| model_type | Модель | Классы |
+|-----------|--------|--------|
+| `small` / `medium` | PFP | Person, Face, Pet |
+| `big` | CLS8 | Person, Face, Pet, Vehicle, + ещё |
 
-### Сравнение двух подходов
+RockIva внутри себя использует `rknn_api`, но **скрывает его**. Свою модель через RockIva загрузить нельзя — формат выходов зашит в коде (`RockIvaBaResult` с `triggerObjects`, `objInfo`, `rect`, `type`).
 
-| | rkadk + MPI | TGI (Task Graph) |
-|---|---|---|
-| **Конфиг** | ini-файлы | JSON-файлы |
-| **NPU?** | Нет (только через ручной GetChnFrame + rknn_api) | Да (`rockx` node) |
-| **RGA?** | Да (VPSS через `VIDEO_PROC_DEV_RGA`) | Да (`rkrga` node) |
-| **Гибкость** | Низкая — фиксированные пайплайны | Высокая — произвольный граф |
-| **Уровень** | C API, оркестрация в rkadk | C++ API, графовый движок |
-| **Свой код в графе?** | Да (GetChnFrame → свой код → SendFrame) | Да (custom RTTaskNode) |
-| **Zero-copy?** | Да (MB_BLK / dmabuf) | Да (RTMediaBuffer) |
+Кадр передаётся в RockIva как DMA-BUF fd (zero-copy):
+
+```c
+// video.c:1428 — реальный код из rkipc
+rkipc_rockiva_write_nv12_frame_by_fd(
+    stViFrame.stVFrame.u32Width,
+    stViFrame.stVFrame.u32Height,
+    loopCount,
+    RK_MPI_MB_Handle2Fd(stViFrame.stVFrame.pMbBlk)  // ← DMA-BUF fd из MPI
+);
+```
+
+### Сравнение подходов
+
+| | rkadk + MPI | TGI | RockIva |
+|---|---|---|---|
+| **Доступен?** | **Да** | Нет (нет в librockit.so) | Да (в rkipc) |
+| **Конфиг** | ini-файлы | JSON-файлы | ini rkipc |
+| **NPU?** | Только вручную (rknn_api) | Да (`rockx` node) | Да (предобученные) |
+| **Своя модель?** | **Да** (rknn_api) | Да (custom node) | Нет |
+| **Zero-copy?** | Да (MB_BLK / dmabuf) | Да (RTMediaBuffer) | Да (dmabuf fd) |
+| **Гибкость** | Полная | Высокая | Низкая (только детекция/BA) |
 
 ### Ответ: можно ли взять кадр с RGA и отправить в NPU?
 
-**Два пути:**
+**На RV1126B в этом SDK — единственный рабочий путь: MPI + rknn_api вручную.**
 
-1. **TGI (рекомендуемый)** — описать граф в JSON: `rkisp → rkrga → rockx → ...`. NPU встроен как node. Но предустановленные модели — только `rockx_*`. Для своих моделей нужен custom node.
+```c
+RK_MPI_VPSS_GetChnFrame(...);          // забрать кадр из VPSS/RGA
+fd = RK_MPI_MB_Handle2Fd(mb);          // получить dmabuf fd (zero-copy)
+rknn_inputs_set(ctx, 1, &input);       // отправить в NPU через rknn_api
+rknn_run(ctx, nullptr);                // inference
+rknn_outputs_get(ctx, 1, outputs, ...);// результат
+RK_MPI_VPSS_ReleaseChnFrame(...);      // вернуть кадр
+```
 
-2. **MPI + rknn_api (ручной)** — в C-коде:
-   ```c
-   RK_MPI_VPSS_GetChnFrame(...);          // забрать кадр из VPSS/RGA
-   fd = RK_MPI_MB_Handle2Fd(mb);          // получить dmabuf fd
-   rknn_inputs_set(ctx, 1, &input);       // отправить в NPU через rknn_api
-   rknn_run(ctx, nullptr);                // inference
-   rknn_outputs_get(ctx, 1, outputs, ...);// результат
-   RK_MPI_VPSS_ReleaseChnFrame(...);      // вернуть кадр
-   ```
-   Это **не через ini**, но zero-copy и полный контроль. `librknn.so` — отдельная библиотека (не входит в этот репо, нужна из RKNN-SDK).
+- `librknn.so` / `librknnmrt.so` — отдельная библиотека (не входит в этот репо, нужна из RKNN-SDK)
+- Кадр берётся из MPI (VPSS/VI), передаётся в NPU через dmabuf fd (zero-copy)
+- Именно так `rkipc` и работает, но через RockIva как прослойку — вы можете сделать то же напрямую
 
-Через rkadk ini **нельзя** — rkadk не знает про NPU. TGI JSON — можно, но только с предустановленными rockx-моделями. Для своих моделей — MPI + rknn_api вручную.
+**Проверить наличие NPU-библиотек на плате:**
+```bash
+find / -name "librknn*" 2>/dev/null       # rknn runtime
+find / -name "librockiva*" 2>/dev/null    # rockiva
+find / -name "*.rknn" 2>/dev/null         # модели
+grep enable_npu /etc/rkipc/*.ini          # включён ли NPU в rkipc
+```
 
 ---
 
