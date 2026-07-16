@@ -3,9 +3,9 @@ cmake_minimum_required(VERSION 2.8.8)
 project(vi_grab_frame C)
 
 # === Платформа ===
-# По умолчанию: RV1126B arm64
-# Переопределить: cmake -DTARGET_ARCH=arm ..
-set(TARGET_ARCH "arm64" CACHE STRING "Target architecture: arm64 or arm")
+# RV1126B: AArch64 (64-bit Linux), toolchain: aarch64-rockchip1240-linux-gnu
+# В SDK есть обе версии librockit.so (arm/arm64), но плата работает в 64-bit.
+set(TARGET_ARCH "arm64" CACHE STRING "Target architecture: arm64 (default) or arm (32-bit fallback)")
 set(TARGET_CHIP "rv1126b" CACHE STRING "Target chip: rv1126b, rk3588, etc.")
 
 if(TARGET_ARCH STREQUAL "arm64")
@@ -28,8 +28,8 @@ message(STATUS "Lib dir: ${ROCKIT_LIB_DIR}")
 
 # === Cross-compile (если нужен) ===
 # Раскомментировать для cross-compile:
-# set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
-# set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
+# set(CMAKE_C_COMPILER aarch64-rockchip1240-linux-gnu-gcc)
+# set(CMAKE_CXX_COMPILER aarch64-rockchip1240-linux-gnu-g++)
 # set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 # set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 

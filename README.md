@@ -770,20 +770,15 @@ grep enable_npu /etc/rkipc/*.ini          # включён ли NPU в rkipc
 ### Сборка
 
 ```bash
-# На Linux-машине с toolchain aarch64:
+# RV1126B: AArch64 (64-bit Linux), toolchain aarch64-rockchip1240-linux-gnu
 cd app/vi_grab_frame
 mkdir build && cd build
 
-# Для arm64 (RV1126B 64-bit):
-cmake -DTARGET_ARCH=arm64 -DTARGET_CHIP=rv1126b ..
-make
-
-# Для arm (RV1126B 32-bit):
-cmake -DTARGET_ARCH=arm -DTARGET_CHIP=rv1126b ..
+cmake -DTARGET_CHIP=rv1126b ..
 make
 
 # Для cross-compile раскомментировать в CMakeLists.txt:
-#   set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+#   set(CMAKE_C_COMPILER aarch64-rockchip1240-linux-gnu-gcc)
 ```
 
 ### Что делает программа
@@ -898,15 +893,11 @@ main()
 ### Сборка
 
 ```bash
+# RV1126B: AArch64 (64-bit Linux), toolchain aarch64-rockchip1240-linux-gnu
 cd app/vi_grab_frame
 mkdir build && cd build
 
-# arm64 (RV1126B 64-bit)
-cmake -DTARGET_ARCH=arm64 -DTARGET_CHIP=rv1126b ..
-make
-
-# arm (RV1126B 32-bit)
-cmake -DTARGET_ARCH=arm -DTARGET_CHIP=rv1126b ..
+cmake -DTARGET_CHIP=rv1126b ..
 make
 
 # Обе программы соберутся: vi_grab_frame и vi_grab_dual
@@ -918,7 +909,7 @@ make
 |---------|---------|---------|
 | `RK_MPI_VI_SetDevAttr already` / `EnableDev already` | rkipc уже запущен и занял VI device | `/etc/init.d/S50rkipc stop` |
 | `RK_MPI_VI_GetChnFrame timeout` | неверный channel id, сенсор не проинициализирован, или ISP не запущен | `media-ctl -p` — проверить что `/dev/video*` живой; начать с канала 0 |
-| `undefined reference to RK_MPI_*` при сборке | `librockit.so` не найден | проверить `ROCKIT_LIB_DIR` в CMake, путь `lib/arm64/rv1126b/linux/` |
+| `undefined reference to RK_MPI_*` при сборке | `librockit.so` не найден | проверить `ROCKIT_LIB_DIR` в CMake, путь `lib/arm64/rv1126b/linux/librockit.so` (AArch64) |
 | `error while loading shared libraries: librockit.so` при запуске | библиотека не в `LD_LIBRARY_PATH` | `export LD_LIBRARY_PATH=/usr/lib:/oem/usr/lib:$LD_LIBRARY_PATH` |
 | Канал 4 не работает | это расширенный канал для NPU/IVS, может требовать `rkipc`-совместимый ini | начать с канала 0 (`-c 0`) |
 | Чёрный файл / нули | сенсор не прогрелся, ISP не откалиброван | подождать 2-3 секунды после запуска, или захватить несколько кадров (`-n 5`) |
