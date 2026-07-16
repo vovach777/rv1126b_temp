@@ -816,6 +816,28 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 - `app/vi_grab_frame/vi_grab_frame.c` — исходник (~250 строк)
 - `app/vi_grab_frame/CMakeLists.txt` — сборка
 
+### Если не работает
+
+| Симптом | Причина | Решение |
+|---------|---------|---------|
+| `RK_MPI_VI_SetDevAttr already` / `EnableDev already` | rkipc уже запущен и занял VI device | `/etc/init.d/S50rkipc stop` |
+| `RK_MPI_VI_GetChnFrame timeout` | неверный channel id, сенсор не проинициализирован, или ISP не запущен | `media-ctl -p` — проверить что `/dev/video*` живой; начать с канала 0 |
+| `undefined reference to RK_MPI_*` при сборке | `librockit.so` не найден | проверить `ROCKIT_LIB_DIR` в CMake, путь `lib/arm64/rv1126b/linux/` |
+| `error while loading shared libraries: librockit.so` при запуске | библиотека не в `LD_LIBRARY_PATH` | `export LD_LIBRARY_PATH=/usr/lib:/oem/usr/lib:$LD_LIBRARY_PATH` |
+| Канал 4 не работает | это расширенный канал для NPU/IVS, может требовать `rkipc`-совместимый ini | начать с канала 0 (`-c 0`) |
+| Чёрный файл / нули | сенсор не прогрелся, ISP не откалиброван | подождать 2-3 секунды после запуска, или захватить несколько кадров (`-n 5`) |
+| `RK_MPI_SYS_Init failed` | MPI уже инициализирован другим процессом | убедиться что rkipc остановлен |
+
+> **Если проблема не решается** — создайте [Issue на GitHub](https://github.com/vovach777/rv1126b_temp/issues).
+> Приложите:
+> - вывод `./vi_grab_frame -v` (с `-v` для подробного лога)
+> - вывод `media-ctl -p` (топология media устройств)
+> - вывод `dmesg | tail -50` (сообщения ядра)
+> - вывод `cat /etc/rkipc/*.ini | grep -E "enable_npu|vi_chn_id|camera_id"` (конфиг rkipc)
+> - на какой плате/сенсоре запускаете
+>
+> Разберёмся.
+
 ---
 
 ## Сборка
