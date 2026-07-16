@@ -347,37 +347,131 @@ RK_MPI_VPSS_ReleaseChnFrame(grp, chn, &stFrame);
 
 Это **не через ini** — это в C-коде. Вы прерываете пайплайн, забираете кадр, обрабатываете, возвращаете. Но это **zero-copy**: кадр лежит в DMA-памяти, NPU может работать с физическим адресом или dmabuf fd напрямую.
 
-### Подход 2: TGI (Task Graph Interface) — НЕ ДОСТУПЕН в этом SDK
+### Подход 2: TGI (Task Graph Interface) — высокоуровневый графовый API
 
-В `external/rockit/tgi/` есть заголовки графового движка `RTTaskGraph` и JSON-конфиги с NPU-узлами. Это реальная подсистема Rockchip, которая позволяет описывать пайплайны в JSON с узлами `rockx` (NPU), `rkrga` (RGA), `rkeptz` (AI PTZ) и др.
+TGI — это графовый движок Rockchip, который позволяет описывать медиа-пайплайны в JSON с узлами `rockx` (NPU), `rkrga` (RGA), `rkeptz` (AI PTZ), `rkisp` (ISP) и др. Официальная документация (`Rockchip_Developer_Guide_Linux_Rockit_CN.pdf`, V0.8.0, 2020-10-28) заявляет поддержку TGI на RV1126/RV1109 (Linux 4.19).
 
-**Но в этом SDK TGI не скомпилирован в `librockit.so`.** Проверка бинарника `librockit.so` (rv1126b arm64) поиском строк:
+#### Что есть в SDK
 
-| Символ/строка | Есть? | Примечание |
-|---------------|:---:|-----------|
-| `RK_MPI_VI_GetChnFrame` | **FOUND** | Получение кадра из VI |
-| `RK_MPI_VPSS_GetChnFrame` | **FOUND** | Получение кадра из VPSS |
-| `RK_MPI_VO_SendFrame` | **FOUND** | Отправка кадра на дисплей |
-| `RK_MPI_SYS_Bind` | **FOUND** | Связывание каналов |
-| `RK_MPI_MB_Handle2Fd` | **FOUND** | DMA-BUF fd из кадра |
-| `RK_MPI_MB_Handle2VirAddr` | **FOUND** | Виртуальный адрес из кадра |
-| `RK_MPI_VENC_SendFrame` | **FOUND** | Кодирование |
-| `RK_MPI_SYS_Init` | **FOUND** | Инициализация |
-| `RTTaskGraph` (TGI) | NOTFOUND | TGI не скомпилирован |
-| `RTTaskNode` (TGI) | NOTFOUND | TGI не скомпилирован |
-| `autoBuild` (TGI) | NOTFOUND | TGI не скомпилирован |
-| `rockx` | NOTFOUND | RockX нет (отдельная .so, не входит) |
-| `rockiva` | NOTFOUND | RockIva нет (отдельная .so, не входит) |
-| `rknn_init` / `rknn_run` | NOTFOUND | RKNN API нет (отдельная .so) |
-| строка `rknn` | FOUND | Только `dlopen("librknnmrt.so")` для аудио SKV — не реализация |
+В `external/rockit/tgi/sdk/`:
+- **50+ заголовков** (`RTTaskGraph.h`, `RTTaskNode.h`, `RTMediaRockx.h`, `RTUVCGraph.h`, и др.)
+- **14 JSON-конфигов** пайплайнов (см. ниже)
+- **PDF-документация** (`tgi/doc/Rockchip_Developer_Guide_Linux_Rockit_CN.pdf`)
+- `RockitConfig.cmake` для сборки
 
-> **Важно:** строка `rknn` в `librockit.so` — это **не** реализация RKNN API. Это `dlopen("librknnmrt.so")` в аудио-модуле SKV (звуковая обработка DOA) и лог-сообщение `"can not open library(%s), it may not need NPU"`. Реальные функции `rknn_init`/`rknn_run`/`rknn_inputs_set` отсутствуют — они в отдельной `librknnmrt.so` из RKNN-SDK.
+#### JSON-конфиги TGI для RV1126B
 
-TGI отсутствует в `librockit.so`. Дополнительно, `RockitConfig.cmake` ссылается на `lib/lib64/librockit.so` — путь, которого не существует. Отдельной `libtgi.so` нет.
+В `external/rockit/tgi/sdk/conf/` (для arm) и `conf/arch64/` (для arm64):
 
-Возможно TGI доступен в полном Rockchip SDK как отдельный пакет, или требует другой сборки `librockit.so`. Но в этом репо — **только MPI**.
+| Конфиг | Пайплайн |
+|--------|----------|
+| `aicamera_rockx_only.json` | rkisp → rockx (face_detect, face_landmark, pose_body) |
+| `aicamera_rockx.json` | UVC + ZOOM + EPTZ + RockX |
+| `aicamera_uvc.json` | Только UVC превью |
+| `aicamera_uvc_zoom.json` | UVC + Zoom + Pan/Tilt |
+| `aicamera_uvc_zoom_eptz.json` | UVC + Zoom + EPTZ |
+| `aicamera_uvc_zoom_rockx.json` | UVC + Zoom + RockX |
+| `aicamera_uvc_zoom_eptz_rockx.json` | Всё вместе |
+| `aicamera_uvc_rkvo.json` | UVC + VO выход |
+| `aicamera_stasteria.json` | ST Asteria (другой AI-движок) |
+| `aicamera_uvc_zoom_stasteria.json` | UVC + Zoom + ST Asteria |
+| `aicamera_faceae.json` | Face AE (экспозиция по лицу) |
+| `aicamera_faceline.json` | Face line |
+| `aisingle.json` | external_source → st_asteria → link_output |
+| `arch64/aicamera_uvc_zoom_fec.json` | UVC + Zoom + FEC (arm64) |
 
-> **Справочно:** если бы TGI был доступен, граф описывался бы JSON-файлом с узлами типа `rockx` (NPU), `rkrga` (RGA). Пример из `aicamera_rockx.json`: `rkisp → rkzoom → rockx(face_detect) → rkeptz → rkrga → link_output`. Но это **не рабочий вариант** для данного SDK.
+#### Пример: `aicamera_rockx_only.json` — чистый AI-пайплайн
+
+```
+rkisp (rkispp_scale1, 640x360 NV12)
+  → rockx (face_detect)      → link_output
+  → rockx (face_landmark)    → link_output
+  → rockx (pose_body_v2)     → link_output
+```
+
+Это именно то, что хочется: **кадр с камеры → NPU (inference) → результат**, декларативно в JSON.
+
+#### Пример: `aisingle.json` — внешний источник в NPU
+
+```
+external_source (NV21) → st_asteria (face/attribute/feature) → link_output
+```
+
+Узел `external_source` принимает кадры извне — можно подавать из MPI (`RK_MPI_VI_GetChnFrame`).
+
+#### Доступные node-типы (из JSON-конфигов и PDF, стр. 2)
+
+| node_name | Тип | Что делает |
+|-----------|-----|-----------|
+| `rkisp` | Device | ISP обработка |
+| `alsa_capture` | Device | Аудио вход |
+| `alsa_playback` | Device | Аудио выход |
+| `rkmpp_dec` | Codec | Декодер H264/H265/MJPEG |
+| `rkmpp_enc` | Codec | Кодер H264/H265/MJPEG |
+| `rkrga` | Filter | **RGA** — scale/crop/rotate |
+| `rockx` | Filter | **NPU** — face detect, pose, landmark, gender/age |
+| `st_asteria` | Filter | ST Asteria AI |
+| `rkeptz` | Filter | AI-based EPTZ (электронный PTZ) |
+| `alg_3a` / `alg_anr` | Filter | Audio 3A |
+| `resample` | Filter | Audio resample |
+| `link_output` | Sink | Выход графа |
+| `external_source` | Source | Внешний источник (кадры подаёте вы) |
+| `fwrite` | Sink | Запись в файл |
+
+#### Что умеет `rockx` (NPU-узел)
+
+Из `RTMediaRockx.h` и JSON-конфигов:
+
+```c
+rockx_face_detect       // детекция лиц
+rockx_face_landmark     // ключевые точки лица
+rockx_pose_body_v2      // поза тела
+rockx_face_gender_age   // пол и возраст
+```
+
+Модели загружаются через `librknn.so` / `librknnmrt.so`.
+
+#### API TGI (из `RTTaskGraph.h`)
+
+```cpp
+RTTaskGraph *graph = new RTTaskGraph();
+graph->autoBuild("aicamera_rockx_only.json");  // построить граф из JSON
+graph->prepare();                                // подготовить ресурсы
+graph->start();                                  // запустить
+// Наблюдать выходной поток:
+graph->observeOutputStream("stream_name", id, [](RTMediaBuffer *buf) {
+    // Получить AI-результат
+    RTAIDetectResults *aiResult;
+    buf->getMetaData()->findPointer(OPT_AI_DETECT_RESULT, &aiResult);
+    buf->release();
+    return RT_OK;
+});
+graph->stop();
+graph->release();
+```
+
+#### Состояние в этом SDK
+
+TGI **спроектирован для RV1126B** (документация, 14 JSON-конфигов, заголовки), но **реализация отсутствует в `librockit.so`**. Проверка `nm -D --defined-only` (1096 экспортированных символов):
+
+| Символ | Есть в `librockit.so`? |
+|--------|:---:|
+| `RK_MPI_VI_GetChnFrame` и др. MPI | **Да** (все) |
+| `RTTaskGraph::autoBuild` | **Нет** |
+| `RTTaskGraph::start` | **Нет** |
+| `RTTaskGraph::linkNode` | **Нет** |
+| `rockx` | **Нет** |
+| `rknn_init` / `rknn_run` | **Нет** |
+
+Дополнительно:
+- `RockitConfig.cmake:12` ссылается на `lib/lib64/librockit.so` — путь не существует (реальные пути: `lib/arm64/rv1126b/linux/`, `lib/arm/rv1126b/linux/`)
+- Каталога `app/aiserver/` (на который ссылается PDF для кастомных плагинов) нет
+- Отдельной `libtgi.so` нет
+- TGI отсутствует во **всех** `librockit.so` в SDK (rv1126b, rk3588, rv1106)
+
+> **Важно:** строка `rknn` в `librockit.so` — это **не** RKNN API. Это `dlopen("librknnmrt.so")` в аудио-модуле SKV (звук DOA) и лог `"can not open library(%s), it may not need NPU"`. Реальные `rknn_init`/`rknn_run` отсутствуют.
+
+**Для использования TGI на RV1126B нужна `librockit.so` с включённым TGI** — возможно, из полного Rockchip SDK или отдельной сборки. JSON-конфиги и заголовки готовы к использованию.
 
 ### Подход 3: RockIva — готовый AI-движок rkipc (НЕ для своих моделей)
 
@@ -420,7 +514,8 @@ rkipc_rockiva_write_nv12_frame_by_fd(
 
 | | rkadk + MPI | TGI | RockIva |
 |---|---|---|---|
-| **Доступен?** | **Да** | Нет (нет в librockit.so) | Да (в rkipc) |
+| **Спроектирован для RV1126B?** | Да | **Да** (PDF, 14 JSON-конфигов) | Да |
+| **Реализация в SDK?** | **Да** (librockit.so) | **Нет** (заголовки и JSON есть, символов в .so нет) | Да (отдельная .so) |
 | **Конфиг** | ini-файлы | JSON-файлы | ini rkipc |
 | **NPU?** | Только вручную (rknn_api) | Да (`rockx` node) | Да (предобученные) |
 | **Своя модель?** | **Да** (rknn_api) | Да (custom node) | Нет |
@@ -429,7 +524,7 @@ rkipc_rockiva_write_nv12_frame_by_fd(
 
 ### Ответ: можно ли взять кадр с RGA и отправить в NPU?
 
-**На RV1126B в этом SDK — единственный рабочий путь: MPI + rknn_api вручную.**
+**В этом SDK — единственный рабочий путь: MPI + rknn_api вручную.** TGI спроектирован для этого (JSON `aicamera_rockx_only.json`), но `librockit.so` не содержит реализации.
 
 ```c
 RK_MPI_VPSS_GetChnFrame(...);          // забрать кадр из VPSS/RGA
