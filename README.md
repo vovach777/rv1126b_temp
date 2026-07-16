@@ -347,6 +347,209 @@ RK_MPI_VPSS_ReleaseChnFrame(grp, chn, &stFrame);
 
 Это **не через ini** — это в C-коде. Вы прерываете пайплайн, забираете кадр, обрабатываете, возвращаете. Но это **zero-copy**: кадр лежит в DMA-памяти, NPU может работать с физическим адресом или dmabuf fd напрямую.
 
+#### Реальный пример из rkipc (RV1126B)
+
+В `app/rkipc/src/rv1126b_ipc/` этот паттерн уже работает — rkipc получает кадры из VI и отправляет их в NPU через RockIva. Это рабочий код, который можно взять за основу.
+
+**1. Инициализация VI канала для NPU** (`video.c:783-807`):
+
+```c
+#define VIDEO_PIPE_0 0   // основной поток (VENC)
+#define VIDEO_PIPE_1 1   // второй поток (VENC)
+#define VIDEO_PIPE_2 2   // JPEG
+int g_vi_for_npu_ivs_id = 4;   // отдельный VI канал для NPU/IVS
+
+VI_CHN_ATTR_S vi_chn_attr;
+memset(&vi_chn_attr, 0, sizeof(vi_chn_attr));
+vi_chn_attr.stIspOpt.u32BufCount = 3;                    // 2 + 1 (ping-pong для NPU)
+vi_chn_attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
+vi_chn_attr.stIspOpt.stMaxSize.u32Width  = 960;
+vi_chn_attr.stIspOpt.stMaxSize.u32Height = 540;
+vi_chn_attr.stSize.u32Width  = 2560;                     // видео.2:width
+vi_chn_attr.stSize.u32Height = 1440;                     // видео.2:height
+vi_chn_attr.enPixelFormat = RK_FMT_YUV420SP;             // NV12
+vi_chn_attr.enCompressMode = COMPRESS_MODE_NONE;
+vi_chn_attr.u32Depth = 1;                                // +1 буфер для NPU
+
+RK_MPI_VI_SetChnAttr(pipe_id_, g_vi_for_npu_ivs_id, &vi_chn_attr);
+RK_MPI_VI_EnableChn(pipe_id_, g_vi_for_npu_ivs_id);
+```
+
+**2. Поток получения кадра и отправки в NPU** (`video.c:1410-1447`):
+
+```c
+static void *rkipc_get_vi_2_send(void *arg) {
+    int ret;
+    int32_t loopCount = 0;
+    VIDEO_FRAME_INFO_S stViFrame;
+    int npu_fps = rk_param_get_int("video.source:npu_fps", 10);
+    int npu_cycle_time_ms = 1000 / npu_fps;
+
+    while (g_video_run_) {
+        long long before_time = rkipc_get_curren_time_ms();
+
+        // 1. Получить кадр из VI (канал 4, отдельный от VENC)
+        if (!enable_fec)
+            ret = RK_MPI_VI_GetChnFrame(pipe_id_, g_vi_for_npu_ivs_id, &stViFrame, 1000);
+        else
+            ret = RK_MPI_VPSS_GetChnFrame(0, 2, &stViFrame, 1000);  // через FEC
+
+        if (ret == RK_SUCCESS) {
+            void *data = RK_MPI_MB_Handle2VirAddr(stViFrame.stVFrame.pMbBlk);
+
+            // 2. Отправить в NPU через RockIva (zero-copy, через dmabuf fd)
+            //    1126b 32bit rga only support fd
+            rkipc_rockiva_write_nv12_frame_by_fd(
+                stViFrame.stVFrame.u32Width,
+                stViFrame.stVFrame.u32Height,
+                loopCount,
+                RK_MPI_MB_Handle2Fd(stViFrame.stVFrame.pMbBlk)  // ← DMA-BUF fd
+            );
+
+            // 3. Вернуть кадр
+            if (!enable_fec)
+                ret = RK_MPI_VI_ReleaseChnFrame(pipe_id_, g_vi_for_npu_ivs_id, &stViFrame);
+            else
+                ret = RK_MPI_VPSS_ReleaseChnFrame(0, 2, &stViFrame);
+
+            loopCount++;
+        } else {
+            LOG_ERROR("RK_MPI_VI or VPSS_GetChnFrame timeout %x\n", ret);
+            sleep(1);
+        }
+
+        // 4. Контроль FPS NPU
+        long long cost_time = rkipc_get_curren_time_ms() - before_time;
+        if ((cost_time > 0) && (cost_time < npu_cycle_time_ms))
+            usleep((npu_cycle_time_ms - cost_time) * 1000);
+    }
+    return NULL;
+}
+```
+
+**3. Что делает `rkipc_rockiva_write_nv12_frame_by_fd`** (`common/rockiva/rockiva.c:393-423`):
+
+```c
+int rkipc_rockiva_write_nv12_frame_by_fd(uint16_t width, uint16_t height,
+                                         uint32_t frame_id, int32_t fd) {
+    RockIvaImage *image = (RockIvaImage *)malloc(sizeof(RockIvaImage));
+    memset(image, 0, sizeof(RockIvaImage));
+    image->info.width = width;
+    image->info.height = height;
+    image->info.format = ROCKIVA_IMAGE_FORMAT_YUV420SP_NV12;
+    image->info.transformMode = ROCKIVA_IMAGE_TRANSFORM_NONE;
+    image->frameId = frame_id;
+    image->dataAddr = NULL;        // не используем виртуальный адрес
+    image->dataPhyAddr = NULL;     // не используем физический адрес
+    image->dataFd = fd;            // ← DMA-BUF fd (zero-copy)
+
+    int ret = ROCKIVA_PushFrame(rkba_handle, image, NULL);
+    if (ret == 0)
+        rk_signal_wait(rockiva_signal, 10000);  // ждать освобождения кадра
+    free(image);
+    return ret;
+}
+```
+
+**4. Инициализация RockIva** (`common/rockiva/rockiva.c:183-322`):
+
+```c
+int rkipc_rockiva_init() {
+    const char *model_type = rk_param_get_string("event.regional_invasion:rockiva_model_type", "small");
+    const char *model_path = rk_param_get_string("event.regional_invasion:rockiva_model_path", "/oem/usr/lib/");
+
+    snprintf(globalParams.modelPath, ROCKIVA_PATH_LENGTH, model_path);
+    globalParams.coreMask = 0x04;
+    globalParams.logLevel = ROCKIVA_LOG_ERROR;
+
+    if (!strcmp(model_type, "small") || !strcmp(model_type, "medium"))
+        globalParams.detModel |= ROCKIVA_DET_MODEL_PFP;   // Person/Face/Pet
+    else if (!strcmp(model_type, "big"))
+        globalParams.detModel |= ROCKIVA_DET_MODEL_CLS8;  // 8 классов
+
+    globalParams.imageInfo.width  = 960;   // видео.2:width
+    globalParams.imageInfo.height = 540;   // видео.2:height
+    globalParams.imageInfo.format = ROCKIVA_IMAGE_FORMAT_YUV420SP_NV12;
+    globalParams.imageInfo.transformMode = ROCKIVA_IMAGE_TRANSFORM_ROTATE_180;
+
+    ROCKIVA_Init(&rkba_handle, ROCKIVA_MODE_VIDEO, &globalParams, NULL);
+    ROCKIVA_BA_Init(rkba_handle, &initParams, rkba_callback);  // Behavior Analysis
+    ROCKIVA_SetFrameReleaseCallback(rkba_handle, rockiva_frame_release_callback);
+    return 0;
+}
+```
+
+**5. Callback получения результатов AI** (`common/rockiva/rockiva.c:117-176`):
+
+```c
+void rkba_callback(const RockIvaBaResult *result, const RockIvaExecuteStatus status,
+                   void *userData) {
+    if (result->objNum == 0) return;
+
+    for (int i = 0; i < result->objNum; i++) {
+        // result->triggerObjects[i].objInfo.rect.topLeft.x/y
+        // result->triggerObjects[i].objInfo.rect.bottomRight.x/y
+        // result->triggerObjects[i].objInfo.objId
+        // result->triggerObjects[i].objInfo.score
+        // result->triggerObjects[i].objInfo.type   (PERSON/FACE/PET/VEHICLE)
+        // result->triggerObjects[i].triggerRules
+        // result->triggerObjects[i].firstTrigger.ruleID
+        // result->triggerObjects[i].firstTrigger.triggerType
+    }
+}
+```
+
+**6. Конфиг в ini** (`rkipc-2688x1520.ini`):
+
+```ini
+[video.source]
+enable_npu = 1
+npu_fps = 10
+
+[video.2]
+width = 2560
+height = 1440
+max_width = 960
+max_height = 540
+
+[event.regional_invasion]
+enabled = 1
+rockiva_model_type = big          ; small | medium | big
+rockiva_model_path = /oem/usr/lib/
+sensitivity_level = 50
+time_threshold = 1
+proportion = 5
+position_x = 0
+position_y = 0
+width = 256
+height = 256
+```
+
+#### Как использовать для своего кода
+
+Этот же паттерн работает и **без RockIva** — замените `rkipc_rockiva_write_nv12_frame_by_fd()` на прямой вызов `rknn_api`:
+
+```c
+// Вместо RockIva — напрямую rknn_api:
+rknn_input input;
+memset(&input, 0, sizeof(input));
+input.index = 0;
+input.type = RKNN_TENSOR_UINT8;
+input.fmt = RKNN_TENSOR_FMT_NHWC;
+input.attr = RKNN_INPUT_ATTR_TYPE_DMABUF;   // zero-copy через fd
+input.fd = RK_MPI_MB_Handle2Fd(stViFrame.stVFrame.pMbBlk);
+input.w = stViFrame.stVFrame.u32Width;
+input.h = stViFrame.stVFrame.u32Height;
+rknn_inputs_set(ctx, 1, &input);
+rknn_run(ctx, nullptr);
+rknn_output outputs[1];
+rknn_outputs_get(ctx, 1, outputs, nullptr);
+// ... обработка outputs ...
+rknn_outputs_release(ctx, 1, outputs);
+```
+
+> **Важно:** `librknnmrt.so` / `librknn.so` — отдельная библиотека из RKNN-SDK, не входит в этот репо. Проверьте наличие на плате: `find / -name "librknn*"`
+
 ### Подход 2: TGI (Task Graph Interface) — высокоуровневый графовый API
 
 TGI — это графовый движок Rockchip, который позволяет описывать медиа-пайплайны в JSON с узлами `rockx` (NPU), `rkrga` (RGA), `rkeptz` (AI PTZ), `rkisp` (ISP) и др. Официальная документация (`Rockchip_Developer_Guide_Linux_Rockit_CN.pdf`, V0.8.0, 2020-10-28) заявляет поддержку TGI на RV1126/RV1109 (Linux 4.19).
@@ -477,19 +680,7 @@ TGI **спроектирован для RV1126B** (документация, 14 
 
 На RV1126B в `rkipc` используется **RockIva** (`librockiva.so`) — высокоуровневая AI-библиотека для IPC. Она загружает предобученные `.rknn` модели из `/oem/usr/lib/` и предоставляет API для детекции объектов и анализа поведения (area invasion, tripwire).
 
-```ini
-# rkipc-2688x1520.ini
-[event.regional_invasion]
-rockiva_model_type = big          ; small | medium | big
-rockiva_model_path = /oem/usr/lib/
-```
-
-```c
-// rockiva.c — реальный код из rkipc
-globalParams.detModel |= ROCKIVA_DET_MODEL_CLS8;  // big = 8 классов
-// или
-globalParams.detModel |= ROCKIVA_DET_MODEL_PFP;   // small/medium = Person/Face/Pet
-```
+Полный рабочий пример использования RockIva приведён выше в разделе **"Реальный пример из rkipc (RV1126B)"** — от инициализации VI канала до callback с результатами AI.
 
 | model_type | Модель | Классы |
 |-----------|--------|--------|
@@ -498,17 +689,7 @@ globalParams.detModel |= ROCKIVA_DET_MODEL_PFP;   // small/medium = Person/Face/
 
 RockIva внутри себя использует `rknn_api`, но **скрывает его**. Свою модель через RockIva загрузить нельзя — формат выходов зашит в коде (`RockIvaBaResult` с `triggerObjects`, `objInfo`, `rect`, `type`).
 
-Кадр передаётся в RockIva как DMA-BUF fd (zero-copy):
-
-```c
-// video.c:1428 — реальный код из rkipc
-rkipc_rockiva_write_nv12_frame_by_fd(
-    stViFrame.stVFrame.u32Width,
-    stViFrame.stVFrame.u32Height,
-    loopCount,
-    RK_MPI_MB_Handle2Fd(stViFrame.stVFrame.pMbBlk)  // ← DMA-BUF fd из MPI
-);
-```
+> **Для своих моделей** — используйте тот же паттерн (VI → `RK_MPI_MB_Handle2Fd` → NPU), но вместо `ROCKIVA_PushFrame` вызывайте `rknn_api` напрямую (см. пример выше в "Как использовать для своего кода").
 
 ### Сравнение подходов
 
