@@ -1196,6 +1196,161 @@ ffmpeg -pix_fmt nv12 -s 3840x1080 -i mega_3840x1080_pts12345678_nv12.raw -f imag
 
 ---
 
+## Три пути стерео-склейки на RV1126B (сводка)
+
+Из документации Rockchip и SDK есть **три принципиальных пути** аппаратного склеивания кадров с двух камер. Сравниваем их все.
+
+### Путь 1: Сенсор сам отдаёт "мега-кадр" (DTS, V4L2)
+
+**Самый простой, быстрый и надёжный путь.** Если сдвоенный сенсор (или мультиплексор) настроен в DTS так, что отдаёт оба кадра бок о бок в одном потоке MIPI-CSI — V4L2 видит это как **одну камеру** с разрешением `2W×H` (или `W×2H`).
+
+```
+Сдвоенный сенсор ──MIPI-CSI──► SoC
+                                │
+                                ▼
+                        /dev/video0 (один узел!)
+                        разрешение: 3840x1080 (2×1920)
+                        формат: NV12
+```
+
+- **Синхронизация:** аппаратная, на уровне сенсора (один шлейф, один такт)
+- **Latency:** 0 (кадр уже склеен в сенсоре)
+- **CPU:** 0
+- **Нужен:** правильный DTS (device tree) — драйвер сенсора должен отдавать мега-разрешение
+- **Как использовать:** `vi_grab_frame -w 3840 -h 1080` — просто как одну камеру!
+
+> **Как проверить:** на плате запустите `v4l2-ctl --list-formats-ext -d /dev/video0`. Если видите `3840x1080` или `1920x2160` — у вас уже Путь 1 работает. Если видите два устройства `/dev/video0` и `/dev/video1` по `1920x1080` — у вас Путь 2 или 3.
+
+### Путь 2: Custom TG-плагин с RGA (Task Graph)
+
+Если сенсоры видны как **две камеры** (Virtual Channels MIPI-CSI2), можно написать custom-плагин `RTTaskNode` который забирает два кадра и склеивает через RGA.
+
+```
+Camera 0 (rkisp) ─node_0─┐
+                          }─node_2─► [Custom Merge: RGA blit] ─► мега-кадр
+Camera 1 (rkisp) ─node_1─┘
+```
+
+**JSON-конфиг TG:**
+```json
+{
+  "pipe_0": {
+    "node_0": {
+      "node_opts": {"node_name": "rkisp"},
+      "stream_opts": {"stream_output": "image:nv12_cam0", "stream_fmt_out": "image:nv12"}
+    },
+    "node_1": {
+      "node_opts": {"node_name": "rkisp"},
+      "stream_opts": {"stream_output": "image:nv12_cam1", "stream_fmt_out": "image:nv12"}
+    },
+    "node_2": {
+      "node_opts": {"node_name": "stereo_merge"},
+      "stream_opts": {
+        "stream_input_0": "image:nv12_cam0",
+        "stream_input_1": "image:nv12_cam1",
+        "stream_output":   "image:nv12_mega",
+        "stream_fmt_in":   "image:nv12",
+        "stream_fmt_out":  "image:nv12"
+      }
+    },
+    "link_0": {"link_name": "stereo", "link_ship": "0,2;1,2"}
+  }
+}
+```
+
+**Custom плагин (C++):**
+```cpp
+class StereoMergeNode : public RTTaskNode {
+  RT_RET process(RTTaskNodeContext *ctx) override {
+    // Ждём оба кадра (TG вызывает process только когда есть данные)
+    if (ctx->inputIsEmpty("stream_input_0") || ctx->inputIsEmpty("stream_input_1"))
+      return RT_RET_OK;
+
+    RTMediaBuffer *in0 = ctx->dequeInputBuffer("stream_input_0");
+    RTMediaBuffer *in1 = ctx->dequeInputBuffer("stream_input_1");
+
+    // Выходной буфер 2×W × H
+    RTMediaBuffer *out = ctx->dequeOutputBuffer(RT_TRUE, in0->getLength() * 2);
+
+    // RGA blit: in0 → left half, in1 → right half (zero-copy через dmabuf fd)
+    rga_blit_to_rect(in0->getFd(), out->getFd(), 0,    0, W, H);
+    rga_blit_to_rect(in1->getFd(), out->getFd(), W,    0, W, H);
+
+    ctx->queueOutputBuffer(out);
+    in0->release();
+    in1->release();
+    return RT_RET_OK;
+  }
+};
+RT_NODE_FACTORY_REGISTER_STUB(StereoMergeNode);
+```
+
+- **Синхронизация:** TG вызывает `process` когда есть данные на обоих входах
+- **Latency:** ~1-3ms (RGA blit)
+- **CPU:** ~0 (RGA = hardware 2D)
+- **Нужен:** `librockit.so` с TGI-символами + заголовки `RTTaskNode.h` (есть в `external/rockit/tgi/sdk/include/`)
+
+> **Важно:** на текущей `librockit.so` в SDK **нет TGI-символов** (мы проверяли ранее — `RTTaskGraph`, `RTTaskNodeFactory` отсутствуют). Путь 2 требует `librockit.so` с включённым TGI. Заголовки и JSON-конфиги есть, реализации — нет. Возможно, нужна отдельная сборка rockit или полный Rockchip SDK.
+
+### Путь 3: AVS (наш `vi_grab_avs`) — MPI, не TG
+
+**Аппаратный блок AVS в MPI** — это то, что мы реализовали в `vi_grab_avs`. Не требует TGI, работает с текущей `librockit.so`.
+
+```
+Sensor 0 → VI dev 0 → VI pipe 0 ─┐
+                                  ├──► AVS Grp 0 ──► мега-кадр 2W×H
+Sensor 1 → VI dev 1 → VI pipe 1 ─┘    bSyncPipe=1
+```
+
+- **Синхронизация:** аппаратная (`bSyncPipe=1`)
+- **Latency:** микросекунды (hardware stitch)
+- **CPU:** 0
+- **Нужен:** только `librockit.so` (есть) + `RK_MPI_AVS_*` символы (есть)
+
+### Сравнение всех трёх путей
+
+| | Путь 1: DTS мега-кадр | Путь 2: TG + RGA | **Путь 3: AVS (MPI)** |
+|---|---|---|---|
+| **Синхронизация** | сенсор (hardware) | TG framework | **AVS `bSyncPipe`** |
+| **Latency** | **0** (уже склеен) | ~1-3ms (RGA) | **микросекунды** |
+| **CPU** | 0 | ~0 (RGA) | **0** |
+| **Нужен DTS?** | **Да** (критично) | нет | нет |
+| **Нужен TGI?** | нет | **Да** (нет в SDK) | нет |
+| **Нужна калибровка?** | нет | нет | для NOBLEND — нет |
+| **Гибкость** | низкая (как сенсор отдаёт) | высокая (custom node) | средняя (hor/ver/blend) |
+| **Работает сейчас?** | проверить `v4l2-ctl` | **нет** (нет TGI в .so) | **да** (`vi_grab_avs`) |
+| **Реализация в SDK** | `vi_grab_frame` (если DTS готов) | нужен custom плагин | **`vi_grab_avs`** |
+
+### Рекомендация
+
+1. **Сначала проверьте Путь 1** — запустите на плате:
+   ```bash
+   v4l2-ctl --list-formats-ext -d /dev/video0
+   v4l2-ctl --list-formats-ext -d /dev/video1
+   media-ctl -p
+   ```
+   Если сенсор отдаёт `3840x1080` — используйте `vi_grab_frame -w 3840 -h 1080`. Это идеальный вариант.
+
+2. **Если Путь 1 не работает** — используйте **`vi_grab_avs`** (Путь 3). Это работает с текущей `librockit.so`, аппаратная синхронизация через `bSyncPipe=1`, не требует TGI.
+
+3. **Путь 2 (TG + RGA)** — reserve, если получите `librockit.so` с TGI-символами. Заголовки и JSON-шаблоны уже есть в `external/rockit/tgi/`.
+
+### Заголовки TGI в SDK (для Пути 2)
+
+Если понадобится Путь 2, в SDK есть всё для разработки custom-плагина:
+
+| Файл | Что |
+|------|-----|
+| `external/rockit/tgi/sdk/include/RTTaskNode.h` | Базовый класс `RTTaskNode` (`open`/`process`/`close`) |
+| `external/rockit/tgi/sdk/include/RTTaskNodeContext.h` | `dequeInputBuffer`, `queueOutputBuffer`, `inputIsEmpty` |
+| `external/rockit/tgi/sdk/include/RTTaskNodeFactory.h` | `RT_NODE_FACTORY_REGISTER_STUB` — регистрация плагина |
+| `external/rockit/tgi/sdk/include/RTTaskGraph.h` | `autoBuild` из JSON, `observeOutputStream` |
+| `external/rockit/tgi/sdk/conf/*.json` | 14 готовых JSON-конфигов (включая `aicamera_uvc_zoom.json` с `rkrga` узлом) |
+
+Пример JSON с RGA-узлом: `external/rockit/tgi/sdk/conf/aicamera_uvc_zoom.json` — там `node_6` использует `rkrga` для transform. Можно взять за основу для stereo-merge.
+
+---
+
 ## Сборка
 
 ```bash
