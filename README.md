@@ -1200,6 +1200,11 @@ ffmpeg -pix_fmt nv12 -s 3840x1080 -i mega_3840x1080_pts12345678_nv12.raw -f imag
 
 Плата: RV1126B, 2× GC2093 (I2C 0x37 и 0x7e), одношлейфовая стереокамера.
 
+![Мега-кадр 3840×1080 (2× GC2093, NOBLEND_HOR, bSyncPipe=1)](docs/mega_frame_preview.png)
+
+<details>
+<summary>Лог запуска</summary>
+
 ```
 $ /tmp/vi_grab_avs -w 1920 -h 1080 -n 1 -v -t 15000
 vi_grab_avs: 1920x1080 per sensor, mode=NOBLEND_HOR, sync=1, mega=3840x1080, frames=1
@@ -1215,10 +1220,13 @@ Waiting for mega-frames (sync=1, this may take a few seconds)...
 Frame 0: 3840x1080 pts=8420618673us grab=168ms → mega_3840x1080_pts8420618673_nv12.raw (6221824 bytes)
 ```
 
+</details>
+
 - **Мега-кадр**: 3840×1080 NV12, 6.2MB
 - **PTS**: 8420618673us (единая для обоих сенсоров!)
-- **Время захвата**: 168ms (включает sync wait + hardware stitch)
+- **Время захвата**: 168ms (включая sync wait + hardware stitch)
 - **Синхронизация**: `bSyncPipe=1` — аппаратная
+- **ISP warmup**: для реального изображения (не тест-паттерна) нужно сначала запустить `rkipc` на 5 секунд, чтобы `rk_aiq` применил IQ-калибровку (`/etc/iqfiles/gc2093_*.json`)
 
 Топология камеры на плате:
 ```
