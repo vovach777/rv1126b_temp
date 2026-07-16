@@ -813,8 +813,97 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 
 ### Файлы
 
-- `app/vi_grab_frame/vi_grab_frame.c` — исходник (~250 строк)
-- `app/vi_grab_frame/CMakeLists.txt` — сборка
+- `app/vi_grab_frame/vi_grab_frame.c` — один сенсор (~250 строк)
+- `app/vi_grab_frame/vi_grab_dual.c` — два сенсора одновременно (~300 строк)
+- `app/vi_grab_frame/CMakeLists.txt` — сборка обеих программ
+
+## CLI: vi_grab_dual — одновременный захват с двух сенсоров
+
+`vi_grab_dual` — захват кадров с двух камер одновременно с минимальной задержкой между ними. Использует два потока с синхронизацией через `pthread_barrier` — оба вызывают `RK_MPI_VI_GetChnFrame` в один момент. Замеряет PTS обоих кадров для оценки реальной задержки.
+
+Основано на `rkipc dual_ipc` (`app/rkipc/src/rv1126b_dual_ipc/video/video.c`).
+
+### Использование
+
+```bash
+# Одновременный захват с двух сенсоров (1920x1080 каждый)
+./vi_grab_dual -w 1920 -h 1080
+# → sensor0_1920x1080_nv12.raw
+# → sensor1_1920x1080_nv12.raw
+
+# Разные разрешения для каждого сенсора
+./vi_grab_dual -w 1920 -h 1080 -W 640 -H 360
+
+# 10 пар кадров с подробным выводом
+./vi_grab_dual -w 1920 -h 1080 -n 10 -v
+
+# Свой префикс имени файла
+./vi_grab_dual -w 1920 -h 1080 -o cam
+# → cam0_1920x1080_nv12.raw
+# → cam1_1920x1080_nv12.raw
+```
+
+### Параметры
+
+| Параметр | Описание | По умолчанию |
+|----------|----------|:---:|
+| `-w, --width0` | ширина сенсора 0 (обязательно) | — |
+| `-h, --height0` | высота сенсора 0 (обязательно) | — |
+| `-W, --width1` | ширина сенсора 1 | = width0 |
+| `-H, --height1` | высота сенсора 1 | = height0 |
+| `-c, --channel` | VI channel id | 0 |
+| `-o, --output` | префикс имени файла | `sensor` |
+| `-n, --count` | сколько пар кадров | 1 |
+| `-t, --timeout` | таймаут GetChnFrame, мс | 1000 |
+| `-v, --verbose` | подробный вывод | нет |
+
+### Вывод
+
+Программа выводит для каждой пары кадров:
+```
+Frame 0: s0=1920x1080 s1=1920x1080 PTS_diff=120us (0.12ms) total=45ms
+  → sensor0_1920x1080_nv12.raw
+  → sensor1_1920x1080_nv12.raw
+```
+
+- **PTS_diff** — разница временных меток кадров (в микросекундах). Чем меньше, тем синхроннее сенсоры. На RV1126B с двумя сенсорами обычно < 1ms.
+- **total** — время захвата пары кадров.
+
+### Как это работает
+
+```
+main()
+  ├── RK_MPI_SYS_Init()
+  ├── for each sensor (0, 1):
+  │     ├── RK_MPI_VI_SetDevAttr(i) + EnableDev(i) + SetDevBindPipe(i)
+  │     └── RK_MPI_VI_SetChnAttr(i, chn) + EnableChn(i, chn)
+  ├── for each frame pair:
+  │     ├── pthread_create(grab_thread, sensor 0)  ─┐
+  │     ├── pthread_create(grab_thread, sensor 1)  ─┤ оба ждут на barrier
+  │     ├── pthread_barrier_wait()                  ─┘ одновременный старт
+  │     ├── pthread_join(0) + pthread_join(1)
+  │     └── printf(PTS_diff)
+  └── cleanup
+```
+
+Ключевой момент — `pthread_barrier_wait()` в каждом потоке перед `RK_MPI_VI_GetChnFrame()`. Это гарантирует что оба потока вызывают `GetChnFrame` в один момент, минимизируя задержку между кадрами.
+
+### Сборка
+
+```bash
+cd app/vi_grab_frame
+mkdir build && cd build
+
+# arm64 (RV1126B 64-bit)
+cmake -DTARGET_ARCH=arm64 -DTARGET_CHIP=rv1126b ..
+make
+
+# arm (RV1126B 32-bit)
+cmake -DTARGET_ARCH=arm -DTARGET_CHIP=rv1126b ..
+make
+
+# Обе программы соберутся: vi_grab_frame и vi_grab_dual
+```
 
 ### Если не работает
 

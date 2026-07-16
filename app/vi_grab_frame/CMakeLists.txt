@@ -36,24 +36,18 @@ message(STATUS "Lib dir: ${ROCKIT_LIB_DIR}")
 # === Флаги ===
 add_definitions(-DOS_LINUX -Wno-unused-variable -Wno-unused-but-set-variable)
 
-# === Исполняемый файл ===
+# === Исполняемые файлы ===
+
+# vi_grab_frame — один сенсор
 add_executable(vi_grab_frame vi_grab_frame.c)
-
-target_include_directories(vi_grab_frame PRIVATE
-    ${ROCKIT_INCLUDE_DIR}
-)
-
-# === Линковка с librockit.so ===
-# librockit.so зависит от: libasound.so.2, librockchip_mpp.so.1, libdrm.so.2
-# На плате они уже есть. Для cross-compile указать путь через -DROCKIT_LIB_DIR
-target_link_directories(vi_grab_frame PRIVATE
-    ${ROCKIT_LIB_DIR}
-)
-
-target_link_libraries(vi_grab_frame
-    rockit      # librockit.so
-    m
-)
-
-# === Установка ===
+target_include_directories(vi_grab_frame PRIVATE ${ROCKIT_INCLUDE_DIR})
+target_link_directories(vi_grab_frame PRIVATE ${ROCKIT_LIB_DIR})
+target_link_libraries(vi_grab_frame rockit m)
 install(TARGETS vi_grab_frame RUNTIME DESTINATION "bin")
+
+# vi_grab_dual — два сенсора одновременно (синхронизация через pthread_barrier)
+add_executable(vi_grab_dual vi_grab_dual.c)
+target_include_directories(vi_grab_dual PRIVATE ${ROCKIT_INCLUDE_DIR})
+target_link_directories(vi_grab_dual PRIVATE ${ROCKIT_LIB_DIR})
+target_link_libraries(vi_grab_dual rockit m pthread)
+install(TARGETS vi_grab_dual RUNTIME DESTINATION "bin")
