@@ -1200,7 +1200,14 @@ ffmpeg -pix_fmt nv12 -s 3840x1080 -i mega_3840x1080_pts12345678_nv12.raw -f imag
 
 Плата: RV1126B, 2× GC2093 (I2C 0x37 и 0x7e), одношлейфовая стереокамера.
 
-![Мега-кадр 3840×1080 (2× GC2093, NOBLEND_HOR, bSyncPipe=1)](docs/mega_frame_preview.png)
+![Мега-кадр 3840×1080 с rkaiq_3A_server (автоэкспозиция)](docs/mega_frame_3a_running.png)
+
+*Сравнение — с `rkaiq_3A_server` и без:*
+
+| С `rkaiq_3A_server` (автоэкспозиция) | Без `rkaiq_3A_server` (нет AE) |
+|---|---|
+| ![с 3A](docs/mega_frame_3a_running.png) | ![без 3A](docs/mega_frame_3a_stopped.png) |
+| unique Y=160, mean=149 (ярко) | unique Y=130, mean=60 (темно) |
 
 <details>
 <summary>Лог запуска</summary>
