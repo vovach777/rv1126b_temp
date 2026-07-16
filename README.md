@@ -1226,19 +1226,24 @@ Frame 0: 3840x1080 pts=8420618673us grab=168ms → mega_3840x1080_pts8420618673_
 - **PTS**: 8420618673us (единая для обоих сенсоров!)
 - **Время захвата**: 168ms (включая sync wait + hardware stitch)
 - **Синхронизация**: `bSyncPipe=1` — аппаратная
-- **ISP warmup (ВАЖНО)**: `vi_grab_avs` не инициализирует `rk_aiq` (нет заголовков `rk_aiq_user_api2_*.h` в SDK). Без warmup сенсоры выдают тест-паттерн (чёрный/белый). Для реального изображения нужно:
-  1. Остановить `rkaiq_3A_server` (он блокирует сенсор): `/etc/init.d/S40rkaiq_3A stop`
-  2. Запустить `rkipc` на 5-8 секунд (инициализирует `rk_aiq` с IQ-файлами `/etc/iqfiles/gc2093_*.json` для обоих сенсоров)
-  3. Остановить `rkipc` — ISP остаётся «тёплым» (калибровка в регистрах)
-  4. Запустить `vi_grab_avs` — подхватывает уже настроенный пайплайн
-  5. Перезапустить `rkaiq_3A_server`: `/etc/init.d/S40rkaiq_3A start`
+- **ISP и rkaiq_3A_server**: `vi_grab_avs` не вызывает `rk_aiq` сам (нет заголовков `rk_aiq_user_api2_*.h` в SDK), но **не нуждается в warmup** при нормально загруженной плате. Тесты:
+
+  | Условие | 3A server | Unique Y | Mean | Результат |
+  |---------|-----------|----------|------|-----------|
+  | 3A running, no warmup | RUNNING | 160 | 149.0 | REAL IMAGE (ярче — автоэкспозиция) |
+  | 3A stopped, no warmup | STOPPED | 130 | 59.7 | REAL IMAGE (темнее) |
+  | 3A stopped, rkipc warmup | STOPPED | 156 | 64.8 | REAL IMAGE |
+  | 3A running, rkipc warmup | RUNNING | — | — | rkipc повис (3A блокирует rk_aiq init) |
+
+  - `rkaiq_3A_server` **НЕ блокирует** `vi_grab_avs` — он работает и получает реальные кадры
+  - `rkaiq_3A_server` **помогает** — делает автоэкспозицию (mean=149 vs 59 без него)
+  - `rkaiq_3A_server` **блокирует** `rk_aiq_uapi2_sysctl_init` — rkipc/simple_vi_get_frame_rkaiq повисают если 3A запущен
+  - **Тест-паттерн** (чёрный/белый Y=16/235) бывает только при самом первом запуске после загрузки платы, когда ISP ещё никогда не инициализировался. После первой инициализации (любым процессом) ISP остаётся «тёплым»
+  - Для лучшего качества: просто оставьте `rkaiq_3A_server` запущенным (по умолчанию) и запускайте `vi_grab_avs` напрямую
 
   ```bash
-  /etc/init.d/S40rkaiq_3A stop
-  /usr/bin/rkipc -c /usr/share/rkipc-dual-800w.ini -l 0 &
-  RKP=$!; sleep 8; kill $RKP; wait $RKP 2>/dev/null
+  # Просто запустите — 3A server уже работает после загрузки:
   /tmp/vi_grab_avs -w 1920 -h 1080 -n 3 -v -t 15000
-  /etc/init.d/S40rkaiq_3A start
   ```
 
   Альтернатива: на плате есть готовый `/usr/bin/simple_vi_bind_avs_bind_venc` — он **сам** инициализирует `rk_aiq` и делает VI→AVS→VENC (H.264), но не сохраняет raw NV12.
