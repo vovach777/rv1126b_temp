@@ -1,0 +1,46 @@
+/*
+ * Patch for app/rkipc/common/isp/rv1126b/isp.c
+ *
+ * Purpose: Enable group IQ file and overlap map file in camgroup config.
+ *          This allows synchronized AWB between stereo cameras.
+ *
+ * Without this patch, rkipc creates camgroup but does NOT pass:
+ *   - group_iq_file    → group AWB calibration (camgroup.json)
+ *   - overlap_map_file → overlap map for stitch (srcOverlapMap.bin)
+ *   - single_iq_file   → explicit single-cam IQ file
+ *
+ * Apply: patch -p1 < stereo/patch_rkipc_camgroup.patch
+ * Revert: patch -p1 -R < stereo/patch_rkipc_camgroup.patch
+ */
+
+--- a/app/rkipc/common/isp/rv1126b/isp.c
++++ b/app/rkipc/common/isp/rv1126b/isp.c
+@@ -164,6 +164,10 @@ int isp_camera_group_init(int cam_group_id, rk_aiq_working_mode_t WDRMode, bool
+ 	rk_aiq_camgroup_instance_cfg_t camgroup_cfg;
+ 	memset(&camgroup_cfg, 0, sizeof(camgroup_cfg));
+
++	/* Stereo: group IQ file (camgroup.json) and overlap map (srcOverlapMap.bin) */
++	const char *group_iq_file = NULL;
++	const char *overlap_map_file = NULL;
++
+ 	camgroup_cfg.sns_num = rk_param_get_int("avs:sensor_num", 6);
+ 	LOG_INFO("camgroup_cfg.sns_num is %d\n", camgroup_cfg.sns_num);
+ 	for (int i = 0; i < camgroup_cfg.sns_num; i++) {
+@@ -185,6 +189,16 @@ int isp_camera_group_init(int cam_group_id, rk_aiq_working_mode_t WDRMode, bool
+ 	}
+
+ 	camgroup_cfg.config_file_dir = iq_file_dir;
++
++	/* Stereo: read optional group_iq_file and overlap_map_file from ini */
++	group_iq_file = rk_param_get_string("avs:group_iq_file", NULL);
++	overlap_map_file = rk_param_get_string("avs:overlap_map_file", NULL);
++	if (group_iq_file) {
++		camgroup_cfg.group_iq_file = group_iq_file;
++		LOG_INFO("camgroup group_iq_file = %s\n", group_iq_file);
++	}
++	if (overlap_map_file)
++		camgroup_cfg.overlap_map_file = overlap_map_file;
++
+ 	g_camera_group_ctx[cam_group_id] = rk_aiq_uapi2_camgroup_create(&camgroup_cfg);
+ 	if (!g_camera_group_ctx[cam_group_id]) {
+ 		LOG_ERROR("create camgroup ctx error!\n");

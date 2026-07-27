@@ -2494,6 +2494,30 @@ flowchart TD
 | rkipc dual IPC | `app/rkipc/src/rv1126b_dual_ipc/` | ini + video.c |
 | rkipc ini | `app/rkipc/src/rv1126b_dual_ipc/rkipc-dual-800w.ini` | `[avs]`, `[isp]` секции |
 
+### Файлы для проверки стерео (директория `stereo/`)
+
+В репо есть директория `stereo/` с готовыми файлами для включения стерео-функций:
+
+| Файл | Назначение |
+|------|-----------|
+| `camgroup_gc2093_dual.json` | Group IQ-файл — синхронизация AWB между камерами (`group_awb: 1`) |
+| `srcOverlapMap.bin` | Карта перекрытия (1896 байт, `RK_PS_SrcOverlapMap`) |
+| `gen_overlap_map.py` | Python-скрипт для регенерации `srcOverlapMap.bin` |
+| `rkipc-stereo-overlay.ini` | INI-оверлей со стерео-настройками |
+| `patch_rkipc_camgroup.patch` | Патч rkipc для `group_iq_file` + `overlap_map_file` |
+| `README.md` | Инструкция по установке и проверке |
+
+**Проблема**: rkipc **НЕ передаёт** `group_iq_file` и `overlap_map_file` в `rk_aiq_uapi2_camgroup_create()` — только `config_file_dir`. Без патча group AWB не работает.
+
+**Что нужно для проверки:**
+1. Скопировать `camgroup_gc2093_dual.json` → `/oem/usr/share/iqfiles/`
+2. Скопировать `srcOverlapMap.bin` → `/oem/usr/share/avs_calib/`
+3. Применить `patch_rkipc_camgroup.patch` и пересобрать rkipc
+4. Обновить ini: `group_mode=1`, `group_ldch=1`, `sync=1`, `projection_mode=1`
+5. Перезапустить rkipc и проверить логи (`camgroup group_iq_file = ...`)
+
+См. `stereo/README.md` для подробной инструкции.
+
 ---
 
 ## CLI: vi_grab_avs_dma — AVS → RGA → DMA буфер (zero-copy пайплайн)
