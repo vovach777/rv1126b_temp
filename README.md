@@ -2875,12 +2875,11 @@ flowchart TD
     C1["Cam1 GC2093"] -->|raw| ISP1["ISP1\n(camgroup 3A sync)"]
     ISP0 -->|bind| AVS["AVS_GRP\nNOBLEND_HOR\nbSyncPipe=1\nLDCH\n5088×1520"]
     ISP1 -->|bind| AVS
-    AVS -->|bind| VPSS["VPSS_GRP\nEnableBackupFrame\nVIDEO_PROC_DEV_VPSS"]
+    AVS -->|bind| VPSS["VPSS_GRP\nVIDEO_PROC_DEV_VPSS"]
 
-    VPSS -->|"CHN0 crop=left\n0,0,2544,1520"| CAM0["Cam0\n2544×1520\n→ файл"]
-    VPSS -->|"CHN1 crop=right\n2544,0,2544,1520"| CAM1["Cam1\n2544×1520\n→ файл"]
-    VPSS -->|"CHN2 full\n(без crop)"| FULL["Full stitch\n5088×1520\n→ файл"]
-    VPSS -.->|"GetGrpFrame\n(backup)"| SNAP["Snapshot\n5088×1520\nобе камеры\nсинхронно"]
+    VPSS -->|"CHN0 crop=left\n0,0,1920,1080"| CAM0["Cam0\n1920×1080\n→ файл"]
+    VPSS -->|"CHN1 crop=right\n1920,0,1920,1080"| CAM1["Cam1\n1920×1080\n→ файл"]
+    VPSS -->|"CHN2 full\n(без crop)"| FULL["Full stitch\n3840×1080\n→ файл"]
 ```
 
 ### Что делает программа
@@ -2892,9 +2891,8 @@ flowchart TD
    - **CHN0**: crop левой половины (cam0)
    - **CHN1**: crop правой половины (cam1)
    - **CHN2**: полный stitch (без crop)
-   - **EnableBackupFrame**: для snapshot через `GetGrpFrame`
 5. **bind_init()** — VI → AVS → VPSS (через `RK_MPI_SYS_Bind`).
-6. **main loop** — `GetChnFrame` с каждого канала, сохранение в `.raw` файлы. Или `GetGrpFrame` для snapshot.
+6. **main loop** — `GetChnFrame` с каждого канала, сохранение в `.raw` файлы.
 
 ### Зачем "сшивать чтобы разрезать"
 
@@ -2920,9 +2918,6 @@ AVS используется **не как панорамный сшивател
 
 # Сохранить полный stitch
 ./stereo_demo -w 1920 -h 1080 --save-full -n 10
-
-# Snapshot через GetGrpFrame (обе камеры в одном кадре, синхронно)
-./stereo_demo -w 1920 -h 1080 --snapshot
 
 # Без camgroup (только AVS sync, без 3A sync)
 ./stereo_demo -w 1920 -h 1080 --no-camgroup --save-cam0 --save-cam1
@@ -2954,7 +2949,6 @@ AVS используется **не как панорамный сшивател
 | `--save-cam0` | сохранять CHN0 (левая камера) | — |
 | `--save-cam1` | сохранять CHN1 (правая камера) | — |
 | `--save-full` | сохранять CHN2 (полный stitch) | — |
-| `--snapshot` | использовать GetGrpFrame | — |
 | `--no-vpss` | получать кадр напрямую из AVS (без VPSS) | — |
 | `-o, --output` | префикс файла | `stereo` |
 | `-t, --timeout` | таймаут GetChnFrame (мс) | 2000 |
@@ -2987,18 +2981,25 @@ AVS используется **не как панорамный сшивател
 
 **Известные проблемы:**
 - `--camgroup` (с `gc2093_IR_default.json`) даёт тёмные кадры (Y=16). Нужен правильный group IQ файл.
-- `--snapshot` (GetGrpFrame) возвращает `0xa0068008` — backup frame не готов без потребления из каналов.
 - IQ-файлы на плате в `/etc/iqfiles/` (не `/oem/usr/share/iqfiles/`). Используйте `--iq-dir /etc/iqfiles`.
 
-### GetGrpFrame vs GetChnFrame
+### Примеры кадров
 
-| | `GetChnFrame` (channel) | `GetGrpFrame` (backup) |
-|---|---|---|
-| **Что возвращает** | Выходной кадр канала (после crop/scale) | Входной кадр (до crop/scale) |
-| **Размер** | Как в `chn_attr` (1920×1080) | Исходный (5088×1520) |
-| **Когда доступен** | Только если кадр прошёл через канал | Всегда, если `EnableBackupFrame` |
-| **Зачем** | Постоянный стрим из канала | Snapshot, одноразовый захват |
-| **Содержит** | Одну камеру (после crop) | Обе камеры (синхронно) |
+**Полный stitch (3840×1080, AVS NOBLEND_HOR):**
+
+![stereo_full](docs/images/stereo_full.png)
+
+Левая половина — cam0, правая — cam1. Граница между камерами чистая (NOBLEND_HOR, без блендинга).
+
+**Cam0 (CHN0, crop левой половины, 1920×1080):**
+
+![stereo_cam0](docs/images/stereo_cam0.png)
+
+**Cam1 (CHN1, crop правой половины, 1920×1080):**
+
+![stereo_cam1](docs/images/stereo_cam1.png)
+
+> Cam0 темнее (Y mean=34) чем cam1 (Y mean=68) — нужна калибровка AE через group IQ файл.
 
 ### Сборка
 

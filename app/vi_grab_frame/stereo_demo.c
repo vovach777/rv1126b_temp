@@ -10,13 +10,13 @@
  *                 ├→ AVS (NOBLEND_HOR, bSyncPipe) → VPSS_GRP → CHN0 (crop left)  → файл
  *   Cam1 → ISP1 ─┘                                          → CHN1 (crop right) → файл
  *                                                           → CHN2 (full stitch) → файл
- *                                                           → GetGrpFrame (backup, snapshot)
+ *                                                           → VPSS CHN0/1/2 (crop + full)
  *
  * Что делает программа:
  *   1. camgroup_init()  — rk_aiq_uapi2_camgroup_create (синхронизация AE/AWB)
  *   2. vi_init()         — VI device + channels + StartPipe (group mode)
  *   3. avs_init()        — AVS group (NOBLEND_HOR, bSyncPipe, LDCH)
- *   4. vpss_init()       — VPSS group + 3 канала (crop left/right/full) + BackupFrame
+ *   4. vpss_init()       — VPSS group + 3 канала (crop left/right/full)
  *   5. bind_init()       — VI → AVS → VPSS
  *   6. main loop         — GetChnFrame с каждого канала, сохранение в файл
  *
@@ -36,8 +36,8 @@
  *   # Сохранить полный стitch
  *   ./stereo_demo -w 1920 -h 1080 -n 10 --save-full
  *
- *   # Snapshot через GetGrpFrame (оба кадра синхронно)
- *   ./stereo_demo -w 1920 -h 1080 --snapshot
+ *   # Snapshot (полный stitch)
+ *   ./stereo_demo -w 1920 -h 1080 --save-full -n 1
  *
  *   # Без camgroup (только AVS sync, без 3A sync)
  *   ./stereo_demo -w 1920 -h 1080 --no-camgroup
@@ -56,7 +56,7 @@
  *   --save-cam0       сохранять CHN0 (левая камера) в cam0_XXX.raw
  *   --save-cam1       сохранять CHN1 (правая камера) в cam1_XXX.raw
  *   --save-full       сохранять CHN2 (полный stitch) в full_XXX.raw
- *   --snapshot        использовать GetGrpFrame вместо GetChnFrame
+ *   --snapshot        (удалён, не работает с bound pipeline)
  *   -o, --output      префикс файла (по умолчанию "stereo")
  *   -t, --timeout     таймаут GetChnFrame в мс (по умолчанию 2000)
  *   -v, --verbose     подробный вывод
@@ -114,7 +114,6 @@ typedef struct {
     int saveCam0;
     int saveCam1;
     int saveFull;
-    int snapshot;
     char iqDir[256];
     char groupIqFile[256];
     char overlapMapFile[256];
@@ -142,7 +141,6 @@ static void usage(const char *prog) {
         "  --save-cam0          save CHN0 (left camera) to cam0_XXX.raw\n"
         "  --save-cam1          save CHN1 (right camera) to cam1_XXX.raw\n"
         "  --save-full          save CHN2 (full stitch) to full_XXX.raw\n"
-        "  --snapshot           use GetGrpFrame (both cameras in one frame)\n"
         "  --no-vpss            get frame directly from AVS (skip VPSS, like vi_grab_avs)\n"
         "  -o, --output <pref>  output file prefix (default: stereo)\n"
         "  -t, --timeout <ms>   GetChnFrame timeout (default: %d)\n"
@@ -150,7 +148,7 @@ static void usage(const char *prog) {
         "\n"
         "Examples:\n"
         "  %s -w 1920 -h 1080 --save-cam0 --save-cam1 -n 10\n"
-        "  %s -w 1920 -h 1080 --snapshot --group-iq camgroup_gc2093_dual.json\n",
+        "  %s -w 1920 -h 1080 --save-full --group-iq camgroup_gc2093_dual.json\n",
         prog, DEFAULT_IQ_DIR, DEFAULT_TIMEOUT_MS, prog, prog);
 }
 
@@ -179,7 +177,6 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
         {"save-cam0",   no_argument,       0, 1007},
         {"save-cam1",   no_argument,       0, 1008},
         {"save-full",   no_argument,       0, 1009},
-        {"snapshot",    no_argument,       0, 1010},
         {"no-vpss",     no_argument,       0, 1011},
         {"output",      required_argument, 0, 'o'},
         {"timeout",     required_argument, 0, 't'},
@@ -207,7 +204,6 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
             case 1007: ctx->saveCam0 = 1; break;
             case 1008: ctx->saveCam1 = 1; break;
             case 1009: ctx->saveFull = 1; break;
-            case 1010: ctx->snapshot = 1; break;
             case 1011: ctx->noVpss = 1; break;
             case '?': usage(argv[0]); return -1;
             default:  usage(argv[0]); return -1;
@@ -668,14 +664,6 @@ static int vpss_init(StereoCtx *ctx) {
         if (ctx->verbose) printf("vpss: CHN2 (full stitch %dx%d) enabled\n", mega_w, mega_h);
     }
 
-    /* EnableBackupFrame — для snapshot через GetGrpFrame */
-    ret = RK_MPI_VPSS_EnableBackupFrame(VPSS_GRP_ID);
-    if (ret != RK_SUCCESS) {
-        fprintf(stderr, "vpss: EnableBackupFrame failed: %#x (continuing)\n", ret);
-    } else if (ctx->verbose) {
-        printf("vpss: BackupFrame enabled (GetGrpFrame available)\n");
-    }
-
     /* SetVProcDev — аппаратный VPSS */
     ret = RK_MPI_VPSS_SetVProcDev(VPSS_GRP_ID, VIDEO_PROC_DEV_VPSS);
     if (ret != RK_SUCCESS) {
@@ -694,7 +682,6 @@ static int vpss_init(StereoCtx *ctx) {
 }
 
 static void vpss_deinit(void) {
-    RK_MPI_VPSS_DisableBackupFrame(VPSS_GRP_ID);
     RK_MPI_VPSS_DisableChn(VPSS_GRP_ID, VPSS_CHN_FULL);
     RK_MPI_VPSS_DisableChn(VPSS_GRP_ID, VPSS_CHN_CAM1);
     RK_MPI_VPSS_DisableChn(VPSS_GRP_ID, VPSS_CHN_CAM0);
@@ -896,38 +883,6 @@ int main(int argc, char **argv) {
             RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stFrame);
         }
         printf("Saved %d mega-frame(s) from AVS directly\n", saved);
-
-    } else if (ctx.snapshot) {
-        /* ── Snapshot mode: GetGrpFrame (обе камеры в одном кадре) ── */
-        int total = ctx.skipFrames + ctx.frameCount;
-        int saved = 0;
-
-        for (frame = 0; frame < total; frame++) {
-            VIDEO_FRAME_INFO_S stFrame;
-            memset(&stFrame, 0, sizeof(stFrame));
-
-            ret = RK_MPI_VPSS_GetGrpFrame(VPSS_GRP_ID, 0, &stFrame);
-            if (ret != RK_SUCCESS) {
-                fprintf(stderr, "GetGrpFrame failed: %#x (frame %d)\n", ret, frame);
-                continue;
-            }
-
-            if (frame < ctx.skipFrames) {
-                RK_MPI_VPSS_ReleaseGrpFrame(VPSS_GRP_ID, 0, &stFrame);
-                if (ctx.verbose) printf("skip frame %d\n", frame);
-                continue;
-            }
-
-            char filename[256];
-            snprintf(filename, sizeof(filename), "%s_snap_%05d_%dx%d.raw",
-                     ctx.outputPrefix, saved,
-                     stFrame.stVFrame.u32Width, stFrame.stVFrame.u32Height);
-            save_frame_to_file(filename, &stFrame, ctx.verbose);
-            saved++;
-
-            RK_MPI_VPSS_ReleaseGrpFrame(VPSS_GRP_ID, 0, &stFrame);
-        }
-        printf("Saved %d snapshot(s) via GetGrpFrame\n", saved);
 
     } else {
         /* ── Channel mode: GetChnFrame с каждого канала ── */
