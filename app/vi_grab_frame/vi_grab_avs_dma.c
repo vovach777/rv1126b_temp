@@ -94,6 +94,7 @@ typedef struct {
     char calibFile[256];
     char outputPrefix[128];
     action_t action;
+    int voDevId;
     int voLayer;
     int voChn;
 } app_ctx_t;
@@ -118,7 +119,8 @@ static void usage(const char *prog) {
         "  --calib <FILE>        calibration XML path (for blend mode)\n"
         "  --no-sync             disable bSyncPipe (not recommended)\n"
         "  --action <ACT>        what to do with DMA buffer: save|vo|free (default: save)\n"
-        "  --vo-layer <N>        VO layer for --action vo (default: 0)\n"
+        "  --vo-dev <N>          VO device id for --action vo (default: 0)\n"
+        "  --vo-layer <N>        VO layer for --action vo (default: 1)\n"
         "  --vo-chn <N>          VO channel for --action vo (default: 0)\n"
         "  -v, --verbose         verbose output\n"
         "  --help                show this help\n"
@@ -159,6 +161,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
         {"no-sync",    no_argument,       0, 1001},
         {"rotate-cam", required_argument, 0, 1003},
         {"action",     required_argument, 0, 1004},
+        {"vo-dev",     required_argument, 0, 1007},
         {"vo-layer",   required_argument, 0, 1005},
         {"vo-chn",     required_argument, 0, 1006},
         {"verbose", no_argument,       0, 'v'},
@@ -179,7 +182,8 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     ctx->bSyncPipe = 1;
     ctx->calibFile[0] = '\0';
     ctx->action = ACTION_SAVE;
-    ctx->voLayer = 0;
+    ctx->voDevId = 0;
+    ctx->voLayer = 1;
     ctx->voChn = 0;
     strcpy(ctx->outputPrefix, "cam");
 
@@ -218,6 +222,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
             }
             case 1005: ctx->voLayer = atoi(optarg); break;
             case 1006: ctx->voChn = atoi(optarg); break;
+            case 1007: ctx->voDevId = atoi(optarg); break;
             case 'v': ctx->verbose = 1; break;
             case '?':
             default:
@@ -416,6 +421,7 @@ static void sig_handler(int s) { g_exit = 1; (void)s; }
 int main(int argc, char **argv) {
     app_ctx_t ctx;
     int ret, i, frame;
+    int vo_inited = 0;
 
     if (parse_args(&ctx, argc, argv) != 0)
         return 1;
@@ -611,6 +617,64 @@ int main(int argc, char **argv) {
     ret = RK_MPI_AVS_StartGrp(AVS_GRP_ID);
     if (ret != RK_SUCCESS) { fprintf(stderr, "AVS_StartGrp: %#x\n", ret); goto cleanup_bind; }
 
+    /* 7b. VO init (only if --action vo) — DSI display 720x1280, layer 1, VO_INTF_MIPI */
+    if (ctx.action == ACTION_VO) {
+        VO_PUB_ATTR_S VoPubAttr;
+        VO_VIDEO_LAYER_ATTR_S stLayerAttr;
+        VO_CSC_S VideoCSC;
+        VO_CHN_ATTR_S VoChnAttr;
+        memset(&VoPubAttr, 0, sizeof(VoPubAttr));
+        memset(&stLayerAttr, 0, sizeof(stLayerAttr));
+        memset(&VideoCSC, 0, sizeof(VideoCSC));
+        memset(&VoChnAttr, 0, sizeof(VoChnAttr));
+
+        /* DSI display: 720x1280 (portrait). rkipc uses VO_INTF_MIPI, dev=0, layer=1. */
+        VoPubAttr.enIntfType = VO_INTF_MIPI;
+        VoPubAttr.enIntfSync = VO_OUTPUT_DEFAULT;
+        ret = RK_MPI_VO_SetPubAttr(ctx.voDevId, &VoPubAttr);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetPubAttr: %#x\n", ret); goto cleanup_bind; }
+        ret = RK_MPI_VO_Enable(ctx.voDevId);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_Enable: %#x\n", ret); goto cleanup_bind; }
+
+        /* Layer dimensions — match display (720x1280) */
+        stLayerAttr.stDispRect.s32X = 0;
+        stLayerAttr.stDispRect.s32Y = 0;
+        stLayerAttr.stDispRect.u32Width = 720;
+        stLayerAttr.stDispRect.u32Height = 1280;
+        stLayerAttr.stImageSize.u32Width = 720;
+        stLayerAttr.stImageSize.u32Height = 1280;
+        stLayerAttr.u32DispFrmRt = 30;
+        stLayerAttr.enPixFormat = RK_FMT_RGB888;
+        VideoCSC.enCscMatrix = VO_CSC_MATRIX_IDENTITY;
+        VideoCSC.u32Contrast = 50;
+        VideoCSC.u32Hue = 50;
+        VideoCSC.u32Luma = 50;
+        VideoCSC.u32Satuature = 50;
+
+        ret = RK_MPI_VO_BindLayer(ctx.voLayer, ctx.voDevId, VO_LAYER_MODE_GRAPHIC);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_BindLayer: %#x\n", ret); goto cleanup_bind; }
+        ret = RK_MPI_VO_SetLayerAttr(ctx.voLayer, &stLayerAttr);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerAttr: %#x\n", ret); goto cleanup_vo_dev; }
+        ret = RK_MPI_VO_EnableLayer(ctx.voLayer);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_EnableLayer: %#x\n", ret); goto cleanup_vo_dev; }
+        ret = RK_MPI_VO_SetLayerCSC(ctx.voLayer, &VideoCSC);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerCSC: %#x\n", ret); goto cleanup_vo_layer; }
+
+        VoChnAttr.bDeflicker = RK_FALSE;
+        VoChnAttr.u32Priority = 1;
+        VoChnAttr.stRect.s32X = 0;
+        VoChnAttr.stRect.s32Y = 0;
+        VoChnAttr.stRect.u32Width = 720;
+        VoChnAttr.stRect.u32Height = 1280;
+        ret = RK_MPI_VO_SetChnAttr(ctx.voLayer, ctx.voChn, &VoChnAttr);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetChnAttr: %#x\n", ret); goto cleanup_vo_layer; }
+        ret = RK_MPI_VO_EnableChn(ctx.voLayer, ctx.voChn);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_EnableChn: %#x\n", ret); goto cleanup_vo_layer; }
+
+        vo_inited = 1;
+        if (ctx.verbose) printf("VO: layer=%d chn=%d enabled (720x1280 DSI)\n", ctx.voLayer, ctx.voChn);
+    }
+
     /* 8. Захват и обработка */
     printf("Pipeline: VI×2 → AVS (mega %dx%d) → RGA crop+rotate(rot=%d) → DMA → %s\n",
            mega_w, mega_h, ctx.rotateCam, action_str);
@@ -701,6 +765,14 @@ cleanup_avs_chn:
 cleanup_avs_grp:
     RK_MPI_AVS_StopGrp(AVS_GRP_ID);
     RK_MPI_AVS_DestroyGrp(AVS_GRP_ID);
+cleanup_vo_layer:
+    if (vo_inited) {
+        RK_MPI_VO_DisableChn(ctx.voLayer, ctx.voChn);
+        RK_MPI_VO_DisableLayer(ctx.voLayer);
+        RK_MPI_VO_UnBindLayer(ctx.voLayer, ctx.voDevId);
+    }
+cleanup_vo_dev:
+    if (vo_inited) RK_MPI_VO_Disable(ctx.voDevId);
 cleanup_pipe:
     for (i = 0; i < NUM_SENSORS; i++) RK_MPI_VI_StopPipe(i);
 cleanup_chn:

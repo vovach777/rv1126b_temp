@@ -2794,7 +2794,7 @@ VI dev0/1 → VI pipe0/1 → AVS grp0 → AVS chn0 (мега-кадр 3840×1080
 # → cam1_1920x1080_pts123_nv12.raw
 
 # Отправить на дисплей (HDMI/LCD) через VO
-./vi_grab_avs_dma -w 1920 -h 1080 --action vo --vo-layer 0 --vo-chn 0 -n 300
+./vi_grab_avs_dma -w 1920 -h 1080 --action vo --vo-dev 0 --vo-layer 1 --vo-chn 0 -n 300
 
 # Benchmark: прогнать 100 кадров, ничего не сохраняя
 ./vi_grab_avs_dma -w 1920 -h 1080 --action free -n 100
@@ -2839,8 +2839,10 @@ dma_buf_free(size, &fd, va);
 |--------|-----------|------------|
 | `--action save` | ✅ работает | `cam0_1920x1080_*.raw`, `cam1_1920x1080_*.raw` (3.1MB каждый) |
 | `--action free` | ✅ работает | ~20-34ms на кадр (benchmark) |
-| `--action vo` | ❌ `VO_SendFrame failed: 0xffffffff` | VO не настроен (нет HDMI/дисплея). Кадры обрабатываются. |
+| `--action vo` | ⚠️ частично | VO init работает (DSI 720×1280, layer=1, dev=0), но `VO_SendFrame` конфликтует с weston/DRM. Нужно останавливать weston (`/etc/init.d/S49weston stop`), но тогда RGA падает (`invalid job` в dmesg). rkipc решает это через bind VI→VO, а не SendFrame. |
 | `--rotate-cam 90` | ✅ работает | Кадры 1080×1920 (повёрнуты) |
+
+**Дисплей на плате:** DSI 720×1280 (портрет), `/dev/dri/card0`, connector `card0-DSI-1`. Управляется weston (Wayland) через DRM. rockit VO и weston конфликтуют за `/dev/dri/card0`.
 
 ### Файлы
 
