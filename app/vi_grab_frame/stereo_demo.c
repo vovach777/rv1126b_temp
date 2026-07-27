@@ -119,6 +119,7 @@ typedef struct {
     char groupIqFile[256];
     char overlapMapFile[256];
     char outputPrefix[64];
+    int noVpss;  /* get frame directly from AVS (no VPSS) */
 } StereoCtx;
 
 static void usage(const char *prog) {
@@ -142,6 +143,7 @@ static void usage(const char *prog) {
         "  --save-cam1          save CHN1 (right camera) to cam1_XXX.raw\n"
         "  --save-full          save CHN2 (full stitch) to full_XXX.raw\n"
         "  --snapshot           use GetGrpFrame (both cameras in one frame)\n"
+        "  --no-vpss            get frame directly from AVS (skip VPSS, like vi_grab_avs)\n"
         "  -o, --output <pref>  output file prefix (default: stereo)\n"
         "  -t, --timeout <ms>   GetChnFrame timeout (default: %d)\n"
         "  -v, --verbose        verbose output\n"
@@ -178,6 +180,7 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
         {"save-cam1",   no_argument,       0, 1008},
         {"save-full",   no_argument,       0, 1009},
         {"snapshot",    no_argument,       0, 1010},
+        {"no-vpss",     no_argument,       0, 1011},
         {"output",      required_argument, 0, 'o'},
         {"timeout",     required_argument, 0, 't'},
         {"verbose",     no_argument,       0, 'v'},
@@ -205,6 +208,7 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
             case 1008: ctx->saveCam1 = 1; break;
             case 1009: ctx->saveFull = 1; break;
             case 1010: ctx->snapshot = 1; break;
+            case 1011: ctx->noVpss = 1; break;
             case '?': usage(argv[0]); return -1;
             default:  usage(argv[0]); return -1;
         }
@@ -342,7 +346,7 @@ static int vi_init(StereoCtx *ctx) {
         VI_CHN_ATTR_S vi_chn_attr;
         memset(&vi_chn_attr, 0, sizeof(vi_chn_attr));
         vi_chn_attr.stIspOpt.u32BufCount = 3;
-        vi_chn_attr.stIspOpt.enCompressMode = COMPRESS_MODE_NONE;
+        vi_chn_attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
         vi_chn_attr.stSize.u32Width = ctx->width;
         vi_chn_attr.stSize.u32Height = ctx->height;
         vi_chn_attr.enPixelFormat = RK_FMT_YUV420SP;
@@ -548,7 +552,7 @@ static int vpss_init(StereoCtx *ctx) {
     {
         VPSS_CHN_ATTR_S attr;
         memset(&attr, 0, sizeof(attr));
-        attr.enChnMode = VPSS_CHN_MODE_AUTO;
+        attr.enChnMode = VPSS_CHN_MODE_USER;
         attr.enDynamicRange = DYNAMIC_RANGE_SDR8;
         attr.enPixelFormat = RK_FMT_YUV420SP;
         attr.stFrameRate.s32SrcFrameRate = -1;
@@ -565,21 +569,24 @@ static int vpss_init(StereoCtx *ctx) {
             return -1;
         }
 
-        /* Crop: левая половина входного кадра */
-        RECT_S crop;
-        crop.s32X = 0;
-        crop.s32Y = 0;
-        crop.u32Width = ctx->width;
-        crop.u32Height = ctx->height;
-        ret = RK_MPI_VPSS_SetChnCrop(VPSS_GRP_ID, VPSS_CHN_CAM0, &crop);
-        if (ret != RK_SUCCESS) {
-            fprintf(stderr, "vpss: CHN0 SetChnCrop failed: %#x\n", ret);
-            return -1;
-        }
-
         ret = RK_MPI_VPSS_EnableChn(VPSS_GRP_ID, VPSS_CHN_CAM0);
         if (ret != RK_SUCCESS) {
             fprintf(stderr, "vpss: CHN0 EnableChn failed: %#x\n", ret);
+            return -1;
+        }
+
+        /* Crop: левая половина входного кадра (set AFTER EnableChn) */
+        VPSS_CROP_INFO_S crop;
+        memset(&crop, 0, sizeof(crop));
+        crop.bEnable = RK_TRUE;
+        crop.enCropCoordinate = VPSS_CROP_ABS_COOR;
+        crop.stCropRect.s32X = 0;
+        crop.stCropRect.s32Y = 0;
+        crop.stCropRect.u32Width = ctx->width;
+        crop.stCropRect.u32Height = ctx->height;
+        ret = RK_MPI_VPSS_SetChnCrop(VPSS_GRP_ID, VPSS_CHN_CAM0, &crop);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: CHN0 SetChnCrop failed: %#x\n", ret);
             return -1;
         }
         if (ctx->verbose) printf("vpss: CHN0 (cam0, crop 0,0,%d,%d) enabled\n",
@@ -590,7 +597,7 @@ static int vpss_init(StereoCtx *ctx) {
     {
         VPSS_CHN_ATTR_S attr;
         memset(&attr, 0, sizeof(attr));
-        attr.enChnMode = VPSS_CHN_MODE_AUTO;
+        attr.enChnMode = VPSS_CHN_MODE_USER;
         attr.enDynamicRange = DYNAMIC_RANGE_SDR8;
         attr.enPixelFormat = RK_FMT_YUV420SP;
         attr.stFrameRate.s32SrcFrameRate = -1;
@@ -607,21 +614,24 @@ static int vpss_init(StereoCtx *ctx) {
             return -1;
         }
 
-        /* Crop: правая половина входного кадра */
-        RECT_S crop;
-        crop.s32X = ctx->width;
-        crop.s32Y = 0;
-        crop.u32Width = ctx->width;
-        crop.u32Height = ctx->height;
-        ret = RK_MPI_VPSS_SetChnCrop(VPSS_GRP_ID, VPSS_CHN_CAM1, &crop);
-        if (ret != RK_SUCCESS) {
-            fprintf(stderr, "vpss: CHN1 SetChnCrop failed: %#x\n", ret);
-            return -1;
-        }
-
         ret = RK_MPI_VPSS_EnableChn(VPSS_GRP_ID, VPSS_CHN_CAM1);
         if (ret != RK_SUCCESS) {
             fprintf(stderr, "vpss: CHN1 EnableChn failed: %#x\n", ret);
+            return -1;
+        }
+
+        /* Crop: правая половина входного кадра (set AFTER EnableChn) */
+        VPSS_CROP_INFO_S crop;
+        memset(&crop, 0, sizeof(crop));
+        crop.bEnable = RK_TRUE;
+        crop.enCropCoordinate = VPSS_CROP_ABS_COOR;
+        crop.stCropRect.s32X = ctx->width;
+        crop.stCropRect.s32Y = 0;
+        crop.stCropRect.u32Width = ctx->width;
+        crop.stCropRect.u32Height = ctx->height;
+        ret = RK_MPI_VPSS_SetChnCrop(VPSS_GRP_ID, VPSS_CHN_CAM1, &crop);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: CHN1 SetChnCrop failed: %#x\n", ret);
             return -1;
         }
         if (ctx->verbose) printf("vpss: CHN1 (cam1, crop %d,0,%d,%d) enabled\n",
@@ -632,7 +642,7 @@ static int vpss_init(StereoCtx *ctx) {
     {
         VPSS_CHN_ATTR_S attr;
         memset(&attr, 0, sizeof(attr));
-        attr.enChnMode = VPSS_CHN_MODE_AUTO;
+        attr.enChnMode = VPSS_CHN_MODE_USER;
         attr.enDynamicRange = DYNAMIC_RANGE_SDR8;
         attr.enPixelFormat = RK_FMT_YUV420SP;
         attr.stFrameRate.s32SrcFrameRate = -1;
@@ -709,14 +719,14 @@ static int bind_init(StereoCtx *ctx) {
 
         ret = RK_MPI_SYS_Bind(&vi_chn, &avs_in_chn);
         if (ret != RK_SUCCESS) {
-            fprintf(stderr, "bind: VI[%d] → AVS[%d] failed: %#x\n", i, i, ret);
+            fprintf(stderr, "bind: VI[%d] -> AVS[%d] failed: %#x\n", i, i, ret);
             return -1;
         }
-        if (ctx->verbose) printf("bind: VI[%d,0] → AVS[%d,%d] OK\n", i, AVS_GRP_ID, i);
+        if (ctx->verbose) printf("bind: VI[%d,0] -> AVS[%d,%d] OK\n", i, AVS_GRP_ID, i);
     }
 
-    /* Bind AVS → VPSS (выход AVS chn0 → вход VPSS group) */
-    {
+    /* Bind AVS → VPSS (skip if --no-vpss) */
+    if (!ctx->noVpss) {
         MPP_CHN_S avs_out, vpss_in;
         avs_out.enModId = RK_ID_AVS;
         avs_out.s32DevId = AVS_GRP_ID;
@@ -727,21 +737,21 @@ static int bind_init(StereoCtx *ctx) {
 
         ret = RK_MPI_SYS_Bind(&avs_out, &vpss_in);
         if (ret != RK_SUCCESS) {
-            fprintf(stderr, "bind: AVS → VPSS failed: %#x\n", ret);
+            fprintf(stderr, "bind: AVS -> VPSS failed: %#x\n", ret);
             return -1;
         }
-        if (ctx->verbose) printf("bind: AVS[%d,%d] → VPSS[%d] OK\n",
+        if (ctx->verbose) printf("bind: AVS[%d,%d] -> VPSS[%d] OK\n",
                                  AVS_GRP_ID, AVS_CHN_ID, VPSS_GRP_ID);
     }
 
     return 0;
 }
 
-static void bind_deinit(void) {
+static void bind_deinit(StereoCtx *ctx) {
     int i;
 
-    /* Unbind AVS → VPSS */
-    {
+    /* Unbind AVS → VPSS (only if VPSS was used) */
+    if (!ctx->noVpss) {
         MPP_CHN_S avs_out, vpss_in;
         avs_out.enModId = RK_ID_AVS;
         avs_out.s32DevId = AVS_GRP_ID;
@@ -749,7 +759,7 @@ static void bind_deinit(void) {
         vpss_in.enModId = RK_ID_VPSS;
         vpss_in.s32DevId = VPSS_GRP_ID;
         vpss_in.s32ChnId = 0;
-        RK_MPI_SYS_Unbind(&avs_out, &vpss_in);
+        RK_MPI_SYS_UnBind(&avs_out, &vpss_in);
     }
 
     /* Unbind VI → AVS */
@@ -761,7 +771,7 @@ static void bind_deinit(void) {
         avs_in_chn.enModId = RK_ID_AVS;
         avs_in_chn.s32DevId = AVS_GRP_ID;
         avs_in_chn.s32ChnId = i;
-        RK_MPI_SYS_Unbind(&vi_chn, &avs_in_chn);
+        RK_MPI_SYS_UnBind(&vi_chn, &avs_in_chn);
     }
 }
 
@@ -829,11 +839,15 @@ int main(int argc, char **argv) {
     ret = avs_init(&ctx);
     if (ret) goto cleanup_vi;
 
-    /* 5. VPSS (fan-out: crop left/right/full) */
-    ret = vpss_init(&ctx);
-    if (ret) goto cleanup_avs;
+    /* 5. VPSS (fan-out: crop left/right/full) — skip if --no-vpss */
+    if (!ctx.noVpss) {
+        ret = vpss_init(&ctx);
+        if (ret) goto cleanup_avs;
+    } else if (ctx.verbose) {
+        printf("vpss: skipped (--no-vpss, getting from AVS directly)\n");
+    }
 
-    /* 6. Bind: VI → AVS → VPSS */
+    /* 6. Bind: VI → AVS → VPSS (or just VI → AVS if --no-vpss) */
     ret = bind_init(&ctx);
     if (ret) goto cleanup_vpss;
 
@@ -849,7 +863,41 @@ int main(int argc, char **argv) {
     printf("Waiting for stereo frames (sync=%d, this may take a few seconds)...\n",
            ctx.bSyncPipe);
 
-    if (ctx.snapshot) {
+    if (ctx.noVpss) {
+        /* ── No-VPSS mode: get frame directly from AVS (like vi_grab_avs) ── */
+        int total = ctx.skipFrames + ctx.frameCount;
+        int saved = 0;
+        int mega_w = ctx.width * NUM_SENSORS;
+        int mega_h = ctx.height;
+
+        for (frame = 0; frame < total; frame++) {
+            VIDEO_FRAME_INFO_S stFrame;
+            memset(&stFrame, 0, sizeof(stFrame));
+
+            ret = RK_MPI_AVS_GetChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stFrame, ctx.timeoutMs);
+            if (ret != RK_SUCCESS) {
+                fprintf(stderr, "AVS GetChnFrame failed: %#x (frame %d)\n", ret, frame);
+                continue;
+            }
+
+            if (frame < ctx.skipFrames) {
+                RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stFrame);
+                if (ctx.verbose) printf("skip frame %d\n", frame);
+                continue;
+            }
+
+            char filename[256];
+            snprintf(filename, sizeof(filename), "%s_mega_%05d_%dx%d.raw",
+                     ctx.outputPrefix, saved,
+                     stFrame.stVFrame.u32Width, stFrame.stVFrame.u32Height);
+            save_frame_to_file(filename, &stFrame, ctx.verbose);
+            saved++;
+
+            RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stFrame);
+        }
+        printf("Saved %d mega-frame(s) from AVS directly\n", saved);
+
+    } else if (ctx.snapshot) {
         /* ── Snapshot mode: GetGrpFrame (обе камеры в одном кадре) ── */
         int total = ctx.skipFrames + ctx.frameCount;
         int saved = 0;
@@ -954,9 +1002,9 @@ int main(int argc, char **argv) {
 
     /* Cleanup */
 cleanup_bind:
-    bind_deinit();
+    bind_deinit(&ctx);
 cleanup_vpss:
-    vpss_deinit();
+    if (!ctx.noVpss) vpss_deinit();
 cleanup_avs:
     avs_deinit();
 cleanup_vi:
