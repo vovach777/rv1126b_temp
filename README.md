@@ -2839,10 +2839,22 @@ dma_buf_free(size, &fd, va);
 |--------|-----------|------------|
 | `--action save` | ✅ работает | `cam0_1920x1080_*.raw`, `cam1_1920x1080_*.raw` (3.1MB каждый) |
 | `--action free` | ✅ работает | ~20-34ms на кадр (benchmark) |
-| `--action vo` | ⚠️ частично | VO init работает (DSI 720×1280, layer=1, dev=0), но `VO_SendFrame` конфликтует с weston/DRM. Нужно останавливать weston (`/etc/init.d/S49weston stop`), но тогда RGA падает (`invalid job` в dmesg). rkipc решает это через bind VI→VO, а не SendFrame. |
+| `--action vo` | ⚠️ VO init работает, SendFrame падает | VO init OK (`VO: layer=1 dev=0 chn=0 enabled (720x1280 DSI)`), но `VO_SendFrame` возвращает `0xffffffff`. Причина: кадр 1920×1080 не совпадает с layer 720×1280, а `bBypassFrame` отключает масштабирование. Без bypass — RGA конфликтует с AVS (`invalid job`). Нужно масштабировать кадр до SendFrame, но RGA занят AVS. |
 | `--rotate-cam 90` | ✅ работает | Кадры 1080×1920 (повёрнуты) |
 
-**Дисплей на плате:** DSI 720×1280 (портрет), `/dev/dri/card0`, connector `card0-DSI-1`. Управляется weston (Wayland) через DRM. rockit VO и weston конфликтуют за `/dev/dri/card0`.
+**Дисплей на плате:** DSI 720×1280 (портрет), `/dev/dri/card0`, connector `card0-DSI-1`. Управляется weston (Wayland) через DRM.
+
+**Как rkadk/rkipc выводят на дисплей:**
+- rkadk: `VI → VPSS → VO` (bind pipeline), VPSS масштабирует кадр до размера layer, VO получает уже готовый кадр через bind (не SendFrame)
+- rkipc: `VI → VO` (bind), `VO_SPLICE_MODE_RGA` — VO сам использует RGA для splice
+- Оба не используют SendFrame напрямую для стриминга — только bind pipeline
+- SendFrame в rkadk используется только на RV1106 (где нет bind)
+
+**Почему `--action vo` в vi_grab_avs_dma не работает:**
+1. AVS использует RGA для сшивания (`stitchNonBlendProc` → `im2d_wrapper_doBlit`)
+2. VO с `VO_SPLICE_MODE_RGA` тоже хочет RGA — конфликт (`invalid job` в dmesg)
+3. `bBypassFrame` отключает RGA в VO, но тогда VO не масштабирует кадр 1920×1080 → 720×1280
+4. Решение: добавить VPSS между AVS и VO для масштабирования (как rkadk), но это меняет архитектуру
 
 ### Файлы
 

@@ -631,30 +631,47 @@ int main(int argc, char **argv) {
         /* DSI display: 720x1280 (portrait). rkipc uses VO_INTF_MIPI, dev=0, layer=1. */
         VoPubAttr.enIntfType = VO_INTF_MIPI;
         VoPubAttr.enIntfSync = VO_OUTPUT_DEFAULT;
+
+        /* Sequence matches rkadk RKADK_MPI_VO_CreateLayDev */
+        ret = RK_MPI_VO_BindLayer(ctx.voLayer, ctx.voDevId, VO_LAYER_MODE_GRAPHIC);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_BindLayer: %#x\n", ret); goto cleanup_bind; }
         ret = RK_MPI_VO_SetPubAttr(ctx.voDevId, &VoPubAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetPubAttr: %#x\n", ret); goto cleanup_bind; }
         ret = RK_MPI_VO_Enable(ctx.voDevId);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_Enable: %#x\n", ret); goto cleanup_bind; }
 
-        /* Layer dimensions — match display (720x1280) */
+        /* Get real display dimensions from driver (like rkadk does) */
+        ret = RK_MPI_VO_GetPubAttr(ctx.voDevId, &VoPubAttr);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_GetPubAttr: %#x\n", ret); goto cleanup_vo_dev; }
+        if (VoPubAttr.stSyncInfo.u16Hact == 0 || VoPubAttr.stSyncInfo.u16Vact == 0) {
+            VoPubAttr.stSyncInfo.u16Hact = 720;
+            VoPubAttr.stSyncInfo.u16Vact = 1280;
+        }
+        int disp_w = VoPubAttr.stSyncInfo.u16Hact;
+        int disp_h = VoPubAttr.stSyncInfo.u16Vact;
+        if (ctx.verbose) printf("VO: display %dx%d (from driver)\n", disp_w, disp_h);
+
+        /* In bypass mode, layer image size must match frame size (no scaling) */
         stLayerAttr.stDispRect.s32X = 0;
         stLayerAttr.stDispRect.s32Y = 0;
-        stLayerAttr.stDispRect.u32Width = 720;
-        stLayerAttr.stDispRect.u32Height = 1280;
-        stLayerAttr.stImageSize.u32Width = 720;
-        stLayerAttr.stImageSize.u32Height = 1280;
+        stLayerAttr.stDispRect.u32Width = disp_w;
+        stLayerAttr.stDispRect.u32Height = disp_h;
+        stLayerAttr.stImageSize.u32Width = disp_w;
+        stLayerAttr.stImageSize.u32Height = disp_h;
         stLayerAttr.u32DispFrmRt = 30;
-        stLayerAttr.enPixFormat = RK_FMT_RGB888;
+        stLayerAttr.enPixFormat = RK_FMT_YUV420SP;
         VideoCSC.enCscMatrix = VO_CSC_MATRIX_IDENTITY;
         VideoCSC.u32Contrast = 50;
         VideoCSC.u32Hue = 50;
         VideoCSC.u32Luma = 50;
         VideoCSC.u32Satuature = 50;
 
-        ret = RK_MPI_VO_BindLayer(ctx.voLayer, ctx.voDevId, VO_LAYER_MODE_GRAPHIC);
-        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_BindLayer: %#x\n", ret); goto cleanup_bind; }
         ret = RK_MPI_VO_SetLayerAttr(ctx.voLayer, &stLayerAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerAttr: %#x\n", ret); goto cleanup_vo_dev; }
+        /* Bypass mode — VO не использует RGA (AVS уже использует RGA, конфликт) */
+        stLayerAttr.bBypassFrame = RK_TRUE;
+        ret = RK_MPI_VO_SetLayerAttr(ctx.voLayer, &stLayerAttr);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerAttr bypass: %#x\n", ret); goto cleanup_vo_dev; }
         ret = RK_MPI_VO_EnableLayer(ctx.voLayer);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_EnableLayer: %#x\n", ret); goto cleanup_vo_dev; }
         ret = RK_MPI_VO_SetLayerCSC(ctx.voLayer, &VideoCSC);
@@ -664,15 +681,16 @@ int main(int argc, char **argv) {
         VoChnAttr.u32Priority = 1;
         VoChnAttr.stRect.s32X = 0;
         VoChnAttr.stRect.s32Y = 0;
-        VoChnAttr.stRect.u32Width = 720;
-        VoChnAttr.stRect.u32Height = 1280;
+        VoChnAttr.stRect.u32Width = disp_w;
+        VoChnAttr.stRect.u32Height = disp_h;
         ret = RK_MPI_VO_SetChnAttr(ctx.voLayer, ctx.voChn, &VoChnAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetChnAttr: %#x\n", ret); goto cleanup_vo_layer; }
         ret = RK_MPI_VO_EnableChn(ctx.voLayer, ctx.voChn);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_EnableChn: %#x\n", ret); goto cleanup_vo_layer; }
 
         vo_inited = 1;
-        if (ctx.verbose) printf("VO: layer=%d chn=%d enabled (720x1280 DSI)\n", ctx.voLayer, ctx.voChn);
+        if (ctx.verbose) printf("VO: layer=%d dev=%d chn=%d enabled (%dx%d DSI)\n",
+                                ctx.voLayer, ctx.voDevId, ctx.voChn, disp_w, disp_h);
     }
 
     /* 8. Захват и обработка */
