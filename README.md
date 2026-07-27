@@ -80,6 +80,21 @@ make
 | `external/rockit/lib/arm64/rv1126b/linux/` | `librockit.so` | линковка |
 | `external/linux-rga/im2d_api/` | `im2d_*.h` (RGA C API) | vi_grab_avs (--split) |
 | `external/linux-rga/include/` | `rga.h`, `drmrga.h` | vi_grab_avs (--split) |
+| `external/camera_engine_rkaiq/` | `Findlibrga.cmake` (3 копии) | для cmake |
+
+### librga.so — отдельная история
+
+В SDK **нет arm64 версии `librga.so`** — только arm32 в `external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm32/`.
+Для RV1126B (arm64) есть 3 варианта:
+
+1. **С платы** (быстро): `scp root@<board>:/usr/lib/librga.so lib/`
+2. **Собрать из исходников** `external/linux-rga/` (есть CMakeLists.txt):
+   ```bash
+   BUILD_RGA_FROM_SOURCE=1 SDK_PATH=/path/to/sdk ./build.sh
+   ```
+3. **CMake find_package** — `Findlibrga.cmake` в SDK ищет системную `librga` (если установлена через пакет)
+
+`build.sh` и `CMakeLists.txt` автоматически ищут `librga.so` в `lib/`, потом в SDK, потом предлагают собрать из исходников.
 
 ### Загрузка на плату
 

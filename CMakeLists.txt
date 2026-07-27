@@ -56,15 +56,43 @@ foreach(d ROCKIT_INC ROCKIT_DEF ROCKIT_LIB RGA_INC_IM2D RGA_INC_RGA)
     endif()
 endforeach()
 
-# --- librga.so — с платы ---
+# --- librga.so — ищем в нескольких местах ---
+# 1. lib/ рядом с CMakeLists.txt (положите туда с платы)
+# 2. $SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/ (в SDK только arm32!)
+# 3. Собираем из $SDK_PATH/external/linux-rga/ (если BUILD_RGA_FROM_SOURCE=ON)
+# Для arm64 (RV1126B) librga.so НЕТ в SDK — только arm32 в rkisp_demo.
 if(NOT DEFINED LIB_RGA_PATH)
     get_filename_component(LIB_RGA_PATH "${CMAKE_SOURCE_DIR}/lib" ABSOLUTE)
+    if(NOT EXISTS "${LIB_RGA_PATH}/librga.so")
+        # Попробуем в SDK
+        set(_RGA_CAND "${SDK_PATH}/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64")
+        if(EXISTS "${_RGA_CAND}/librga.so")
+            set(LIB_RGA_PATH "${_RGA_CAND}")
+            message(STATUS "Found librga.so in SDK: ${LIB_RGA_PATH}")
+        endif()
+    endif()
 endif()
 if(NOT EXISTS "${LIB_RGA_PATH}/librga.so")
-    message(WARNING
-        "librga.so not found in ${LIB_RGA_PATH}.\n"
-        "Get it from the board: scp root@<board>:/usr/lib/librga.so ${LIB_RGA_PATH}/\n"
-        "Or: cmake -DLIB_RGA_PATH=/other/path ..")
+    if(BUILD_RGA_FROM_SOURCE)
+        message(STATUS "Building librga.so from ${SDK_PATH}/external/linux-rga/...")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${SDK_PATH}/external/linux-rga/build
+        )
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} ${SDK_PATH}/external/linux-rga
+                    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+            WORKING_DIRECTORY ${SDK_PATH}/external/linux-rga/build
+        )
+        execute_process(COMMAND ${CMAKE_COMMAND} --build . -- -j4
+            WORKING_DIRECTORY ${SDK_PATH}/external/linux-rga/build)
+        set(LIB_RGA_PATH "${SDK_PATH}/external/linux-rga/build")
+    else()
+        message(WARNING
+            "librga.so (arm64) not found in ${LIB_RGA_PATH}.\n"
+            "Get from board: scp root@<board>:/usr/lib/librga.so ${LIB_RGA_PATH}/\n"
+            "Or: cmake -DLIB_RGA_PATH=/other/path ..\n"
+            "Or: cmake -DBUILD_RGA_FROM_SOURCE=ON .. (builds from external/linux-rga/)")
+    endif()
 endif()
 
 # --- Includes ---

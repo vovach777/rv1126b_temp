@@ -54,8 +54,47 @@ for d in "$ROCKIT_INC" "$ROCKIT_DEF" "$ROCKIT_LIB" "$RGA_INC1" "$RGA_INC2"; do
     fi
 done
 
-# librga.so — с платы. По умолчанию ищем в lib/ рядом со скриптом (положите туда).
+# librga.so — ищем в нескольких местах:
+#   1. lib/ рядом со скриптом (положите туда с платы)
+#   2. $SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/ (есть в SDK, но только arm32!)
+#   3. Собираем из исходников $SDK_PATH/external/linux-rga/ (если есть cmake + cross-compiler)
+# Для arm64 (RV1126B) librga.so НЕТ в SDK — только arm32 в rkisp_demo.
+# Берём с платы: scp root@<board>:/usr/lib/librga.so lib/
 LIB_RGA_PATH="${LIB_RGA_PATH:-$(dirname "$0")/lib}"
+
+# Автопоиск librga.so в SDK (на случай если появится arm64)
+if [ ! -f "$LIB_RGA_PATH/librga.so" ]; then
+    for cand in \
+        "$SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/librga.so" \
+        "$SDK_PATH/external/linux-rga/build/librga.so"; do
+        if [ -f "$cand" ]; then
+            LIB_RGA_PATH="$(dirname "$cand")"
+            echo "Found librga.so in SDK: $cand"
+            break
+        fi
+    done
+fi
+
+if [ ! -f "$LIB_RGA_PATH/librga.so" ]; then
+    echo "WARNING: librga.so not found."
+    echo "  Get it from the board: scp root@<board-ip>:/usr/lib/librga.so $LIB_RGA_PATH/"
+    echo "  Or build from source:  cd $SDK_PATH/external/linux-rga && mkdir build && cd build && cmake .. && make"
+    echo "  (arm32 version is in SDK at external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm32/ — NOT for arm64)"
+    if [ "${BUILD_RGA_FROM_SOURCE:-0}" = "1" ]; then
+        echo "BUILD_RGA_FROM_SOURCE=1 — building librga.so from $SDK_PATH/external/linux-rga/..."
+        mkdir -p "$SDK_PATH/external/linux-rga/build"
+        (cd "$SDK_PATH/external/linux-rga/build" && cmake -DCMAKE_C_COMPILER=zig -DCMAKE_CXX_COMPILER=zig++ .. && make -j4) || {
+            echo "ERROR: failed to build librga from source"
+            exit 1
+        }
+        LIB_RGA_PATH="$SDK_PATH/external/linux-rga/build"
+    else
+        echo "  Or set BUILD_RGA_FROM_SOURCE=1 to build from $SDK_PATH/external/linux-rga/"
+        exit 1
+    fi
+fi
+echo "LIB_RGA_PATH = $LIB_RGA_PATH"
+
 mkdir -p build
 
 CC="zig cc -target aarch64-linux-gnu"
@@ -85,5 +124,6 @@ echo ""
 echo "Done. Binaries in build/"
 echo "Copy to board: scp build/* root@<board>:/tmp/"
 echo ""
-echo "NOTE: librga.so is NOT in SDK. Get it from the board:"
-echo "  scp root@<board>:/usr/lib/librga.so $LIB_RGA_PATH/"
+echo "NOTE: librga.so (arm64) is NOT in SDK — only arm32 in rkisp_demo."
+echo "  Get from board: scp root@<board>:/usr/lib/librga.so $LIB_RGA_PATH/"
+echo "  Or build from source: BUILD_RGA_FROM_SOURCE=1 $0"
