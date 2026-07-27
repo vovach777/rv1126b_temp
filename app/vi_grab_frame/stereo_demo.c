@@ -24,12 +24,6 @@
  *   # Базовый запуск (2× 1920×1080, crop на две камеры)
  *   ./stereo_demo -w 1920 -h 1080
  *
- *   # С group IQ файлом (синхронизация AWB)
- *   ./stereo_demo -w 1920 -h 1080 \
- *     --iq-dir /oem/usr/share/iqfiles \
- *     --group-iq camgroup_gc2093_dual.json \
- *     --overlap-map srcOverlapMap.bin
- *
  *   # 10 кадров, сохранить каждую камеру отдельно
  *   ./stereo_demo -w 1920 -h 1080 -n 10 --save-cam0 --save-cam1
  *
@@ -48,15 +42,12 @@
  *   -n, --count       сколько кадров сохранить (по умолчанию 1)
  *   -s, --skip        отбросить первые N кадров (прогрев, по умолчанию 5)
  *   --iq-dir          путь к IQ-файлам (по умолчанию /oem/usr/share/iqfiles)
- *   --group-iq        group IQ файл (camgroup.json) для синхронизации AWB
- *   --overlap-map     overlap map файл (srcOverlapMap.bin)
  *   --no-camgroup     отключить camgroup (только AVS sync)
  *   --no-sync         отключить bSyncPipe (не рекомендуется)
  *   --no-ldch         отключить LDCH (коррекция дисторсии)
  *   --save-cam0       сохранять CHN0 (левая камера) в cam0_XXX.raw
  *   --save-cam1       сохранять CHN1 (правая камера) в cam1_XXX.raw
  *   --save-full       сохранять CHN2 (полный stitch) в full_XXX.raw
- *   --snapshot        (удалён, не работает с bound pipeline)
  *   -o, --output      префикс файла (по умолчанию "stereo")
  *   -t, --timeout     таймаут GetChnFrame в мс (по умолчанию 2000)
  *   -v, --verbose     подробный вывод
@@ -115,8 +106,6 @@ typedef struct {
     int saveCam1;
     int saveFull;
     char iqDir[256];
-    char groupIqFile[256];
-    char overlapMapFile[256];
     char outputPrefix[64];
     int noVpss;  /* get frame directly from AVS (no VPSS) */
 } StereoCtx;
@@ -133,8 +122,6 @@ static void usage(const char *prog) {
         "  -n, --count <N>      frames to save (default: 1)\n"
         "  -s, --skip <N>       discard first N frames for warmup (default: 5)\n"
         "  --iq-dir <path>      IQ files directory (default: %s)\n"
-        "  --group-iq <file>    group IQ file for AWB sync (e.g. camgroup_gc2093_dual.json)\n"
-        "  --overlap-map <file> overlap map file (e.g. srcOverlapMap.bin)\n"
         "  --no-camgroup        disable camgroup (only AVS sync, no 3A sync)\n"
         "  --no-sync            disable bSyncPipe (not recommended)\n"
         "  --no-ldch            disable LDCH (lens distortion correction)\n"
@@ -148,7 +135,7 @@ static void usage(const char *prog) {
         "\n"
         "Examples:\n"
         "  %s -w 1920 -h 1080 --save-cam0 --save-cam1 -n 10\n"
-        "  %s -w 1920 -h 1080 --save-full --group-iq camgroup_gc2093_dual.json\n",
+        "  %s -w 1920 -h 1080 --save-full -n 10\n",
         prog, DEFAULT_IQ_DIR, DEFAULT_TIMEOUT_MS, prog, prog);
 }
 
@@ -169,8 +156,6 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
         {"count",       required_argument, 0, 'n'},
         {"skip",        required_argument, 0, 's'},
         {"iq-dir",      required_argument, 0, 1001},
-        {"group-iq",    required_argument, 0, 1002},
-        {"overlap-map", required_argument, 0, 1003},
         {"no-camgroup", no_argument,       0, 1004},
         {"no-sync",     no_argument,       0, 1005},
         {"no-ldch",     no_argument,       0, 1006},
@@ -196,8 +181,6 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
             case 't': ctx->timeoutMs = atoi(optarg); break;
             case 'v': ctx->verbose = 1; break;
             case 1001: strncpy(ctx->iqDir, optarg, sizeof(ctx->iqDir)-1); break;
-            case 1002: strncpy(ctx->groupIqFile, optarg, sizeof(ctx->groupIqFile)-1); break;
-            case 1003: strncpy(ctx->overlapMapFile, optarg, sizeof(ctx->overlapMapFile)-1); break;
             case 1004: ctx->enableCamgroup = 0; break;
             case 1005: ctx->bSyncPipe = 0; break;
             case 1006: ctx->enableLdch = 0; break;
@@ -236,18 +219,6 @@ static int camgroup_init(StereoCtx *ctx) {
 
     cfg.sns_num = NUM_SENSORS;
     cfg.config_file_dir = ctx->iqDir;
-
-    /* Group IQ file (camgroup.json) — для синхронизации AWB */
-    if (ctx->groupIqFile[0] != '\0') {
-        cfg.group_iq_file = ctx->groupIqFile;
-        if (ctx->verbose) printf("camgroup: group_iq_file = %s\n", ctx->groupIqFile);
-    }
-
-    /* Overlap map (srcOverlapMap.bin) — для AVS overlap info */
-    if (ctx->overlapMapFile[0] != '\0') {
-        cfg.overlap_map_file = ctx->overlapMapFile;
-        if (ctx->verbose) printf("camgroup: overlap_map_file = %s\n", ctx->overlapMapFile);
-    }
 
     /* Enumerate sensors by physical ID */
     for (int i = 0; i < NUM_SENSORS; i++) {

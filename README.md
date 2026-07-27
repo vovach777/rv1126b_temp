@@ -2749,29 +2749,7 @@ flowchart TD
 | rkipc dual IPC | `app/rkipc/src/rv1126b_dual_ipc/` | ini + video.c |
 | rkipc ini | `app/rkipc/src/rv1126b_dual_ipc/rkipc-dual-800w.ini` | `[avs]`, `[isp]` секции |
 
-### Файлы для проверки стерео (директория `stereo/`)
-
-В репо есть директория `stereo/` с готовыми файлами для включения стерео-функций:
-
-| Файл | Назначение |
-|------|-----------|
-| `camgroup_gc2093_dual.json` | Group IQ-файл — синхронизация AWB между камерами (`group_awb: 1`) |
-| `srcOverlapMap.bin` | Карта перекрытия (1896 байт, `RK_PS_SrcOverlapMap`) |
-| `gen_overlap_map.py` | Python-скрипт для регенерации `srcOverlapMap.bin` |
-| `rkipc-stereo-overlay.ini` | INI-оверлей со стерео-настройками |
-| `patch_rkipc_camgroup.patch` | Патч rkipc для `group_iq_file` + `overlap_map_file` |
-| `README.md` | Инструкция по установке и проверке |
-
-**Проблема**: rkipc **НЕ передаёт** `group_iq_file` и `overlap_map_file` в `rk_aiq_uapi2_camgroup_create()` — только `config_file_dir`. Без патча group AWB не работает.
-
-**Что нужно для проверки:**
-1. Скопировать `camgroup_gc2093_dual.json` → `/oem/usr/share/iqfiles/`
-2. Скопировать `srcOverlapMap.bin` → `/oem/usr/share/avs_calib/`
-3. Применить `patch_rkipc_camgroup.patch` и пересобрать rkipc
-4. Обновить ini: `group_mode=1`, `group_ldch=1`, `sync=1`, `projection_mode=1`
-5. Перезапустить rkipc и проверить логи (`camgroup group_iq_file = ...`)
-
-См. `stereo/README.md` для подробной инструкции.
+> **Note:** `group_iq_file` и `overlap_map_file` в `rk_aiq_camgroup_instance_cfg_t` существуют в API, но **`rk_aiq_uapi2_camgroup_create()` зависает** при их использовании на этой плате (проверено на RV1126B). Используйте camgroup без них — `config_file_dir` достаточно для базовой синхронизации AE/AWB.
 
 ---
 
@@ -2855,6 +2833,15 @@ dma_buf_free(size, &fd, va);
 
 `/dev/dma_heap/system-uncached` — некэшируемый DMA буфер. RGA пишет через IOMMU (без CPU), CPU читает без `dma_sync_cpu_to_device` (uncached = всегда актуальные данные). Для cached буферов (`/dev/dma_heap/system`) нужна синхронизация.
 
+### Результаты тестирования на плате (RV1126B, 10.0.55.160)
+
+| Action | Результат | Примечание |
+|--------|-----------|------------|
+| `--action save` | ✅ работает | `cam0_1920x1080_*.raw`, `cam1_1920x1080_*.raw` (3.1MB каждый) |
+| `--action free` | ✅ работает | ~20-34ms на кадр (benchmark) |
+| `--action vo` | ❌ `VO_SendFrame failed: 0xffffffff` | VO не настроен (нет HDMI/дисплея). Кадры обрабатываются. |
+| `--rotate-cam 90` | ✅ работает | Кадры 1080×1920 (повёрнуты) |
+
 ### Файлы
 
 - `app/vi_grab_frame/vi_grab_avs_dma.c` — исходник (~500 строк)
@@ -2884,7 +2871,7 @@ flowchart TD
 
 ### Что делает программа
 
-1. **camgroup_init()** — `rk_aiq_uapi2_camgroup_create()` + `prepare()` + `start()`. Синхронизация AE/AWB между камерами. Опционально с group IQ файлом (`camgroup_gc2093_dual.json`) и overlap map.
+1. **camgroup_init()** — `rk_aiq_uapi2_camgroup_create()` + `prepare()` + `start()`. Синхронизация AE/AWB между камерами.
 2. **vi_init()** — VI device + channels + StartPipe (group mode, как rkipc `rv1126b_dual_ipc`).
 3. **avs_init()** — AVS group с `NOBLEND_HOR` + `bSyncPipe=1` + LDCH. Сшивает две камеры в мега-кадр **без blend** (чисто для синхронизации и баланса).
 4. **vpss_init()** — VPSS group с 3 каналами:
@@ -2908,13 +2895,6 @@ AVS используется **не как панорамный сшивател
 ```bash
 # Базовый запуск (2× 1920×1080, сохранить обе камеры отдельно)
 ./stereo_demo -w 1920 -h 1080 --save-cam0 --save-cam1 -n 10
-
-# С group IQ файлом (синхронизация AWB)
-./stereo_demo -w 1920 -h 1080 \
-  --iq-dir /oem/usr/share/iqfiles \
-  --group-iq camgroup_gc2093_dual.json \
-  --overlap-map srcOverlapMap.bin \
-  --save-cam0 --save-cam1 -n 10
 
 # Сохранить полный stitch
 ./stereo_demo -w 1920 -h 1080 --save-full -n 10
@@ -2941,8 +2921,6 @@ AVS используется **не как панорамный сшивател
 | `-n, --count` | сколько кадров сохранить | 1 |
 | `-s, --skip` | отбросить первые N кадров (прогрев) | 5 |
 | `--iq-dir` | путь к IQ-файлам | `/oem/usr/share/iqfiles` |
-| `--group-iq` | group IQ файл (camgroup.json) для AWB sync | — |
-| `--overlap-map` | overlap map файл (srcOverlapMap.bin) | — |
 | `--no-camgroup` | отключить camgroup (только AVS sync) | — |
 | `--no-sync` | отключить bSyncPipe | — |
 | `--no-ldch` | отключить LDCH | — |
@@ -2980,8 +2958,20 @@ AVS используется **не как панорамный сшивател
 - Cam0 темнее (mean=34) чем cam1 (mean=68) — нужна калибровка AE
 
 **Известные проблемы:**
-- `--camgroup` (с `gc2093_IR_default.json`) даёт тёмные кадры (Y=16). Нужен правильный group IQ файл.
+- `--camgroup` (с `gc2093_IR_default.json`) даёт тёмные кадры (Y=16). Нужен правильный IQ файл.
+- `group_iq_file` и `overlap_map_file` в `rk_aiq_camgroup_instance_cfg_t` **не работают** — `camgroup_create` зависает. Удалены из stereo_demo.
 - IQ-файлы на плате в `/etc/iqfiles/` (не `/oem/usr/share/iqfiles/`). Используйте `--iq-dir /etc/iqfiles`.
+
+**Проверенные опции (на плате RV1126B):**
+
+| Опция | Результат | Примечание |
+|-------|-----------|------------|
+| `--no-ldch` | ✅ работает | `avs: LDCH disabled (--no-ldch)`, кадры сохраняются |
+| `--no-sync` | ✅ работает | `sync=0`, кадры сохраняются (без bSyncPipe) |
+| `--no-camgroup` | ✅ работает | camgroup отключен, только AVS |
+| `--no-vpss` | ✅ работает | кадр напрямую из AVS |
+| `--save-full` | ✅ работает | полный stitch 3840×1080 через CHN2 |
+| `--save-cam0` / `--save-cam1` | ✅ работает | crop половин через VPSS CHN0/CHN1 |
 
 ### Примеры кадров
 
@@ -2999,7 +2989,7 @@ AVS используется **не как панорамный сшивател
 
 ![stereo_cam1](docs/images/stereo_cam1.png)
 
-> Cam0 темнее (Y mean=34) чем cam1 (Y mean=68) — нужна калибровка AE через group IQ файл.
+> Cam0 темнее (Y mean=34) чем cam1 (Y mean=68) — нужна калибровка AE.
 
 ### Сборка
 
