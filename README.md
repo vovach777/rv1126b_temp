@@ -1109,8 +1109,16 @@ RGA имеет смысл если:
 ./vi_grab_avs -w 1920 -h 1080
 # → mega_3840x1080_pts12345678_nv12.raw
 
-# 10 мега-кадров
-./vi_grab_avs -w 1920 -h 1080 -n 10
+# 10 мега-кадров с пропуском 5 warmup
+./vi_grab_avs -w 1920 -h 1080 -s 5 -n 10
+
+# Нарезать мега-кадр на 2 файла (cam0, cam1) через RGA
+./vi_grab_avs -w 1920 -h 1080 --split
+# → mega0_1920x1080_*.raw, mega1_1920x1080_*.raw
+
+# Портрет: каждая камера повёрнута на 90° через RGA
+./vi_grab_avs -w 1920 -h 1080 --split --rotate-cam 90
+# → mega0_1080x1920_*.raw, mega1_1080x1920_*.raw
 
 # Вертикально (1920x2160)
 ./vi_grab_avs -w 1920 -h 1080 -m ver
@@ -1131,7 +1139,10 @@ RGA имеет смысл если:
 | `-m, --mode` | режим AVS: `hor`, `ver`, `blend` | `hor` |
 | `-c, --channel` | VI channel id (0 = MAINPATH) | 0 |
 | `-o, --output` | префикс файла | `mega` |
-| `-n, --count` | сколько мега-кадров | 1 |
+| `-n, --count` | сколько мега-кадров сохранить | 1 |
+| `-s, --skip` | отбросить первые N кадров (прогрев ISP/AVS) | 0 |
+| `--split` | нарезать мега-кадр на cam0/cam1 через RGA | нет |
+| `--rotate-cam` | повернуть каждую половинку в RGA: 0/90/180/270 | 0 |
 | `-t, --timeout` | таймаут GetChnFrame, мс | 2000 |
 | `--calib <FILE>` | калибровочный XML (для blend) | — |
 | `--no-sync` | отключить `bSyncPipe` | нет |
@@ -1169,8 +1180,9 @@ Frame 0: 3840x1080 pts=12345678us grab=45ms → mega_3840x1080_pts12345678_nv12.
 7. `RK_MPI_SYS_Bind(VI → AVS)` для каждого сенсора
 8. `RK_MPI_AVS_StartGrp` — запуск AVS
 9. `RK_MPI_AVS_GetChnFrame` — получение мега-кадра (одно PTS для обоих сенсоров!)
-10. `fwrite()` — сохранение в файл
-11. Очистка: `UnBind` → `DisableChn` → `StopGrp` → `DestroyGrp` → `StopPipe` → `DisableChnExt` → `DisableDev` → `SYS_Exit`
+10. Если `--skip N`: первые N кадров только `ReleaseChnFrame` (прогрев, без сохранения)
+11. `fwrite()` — сохранение в файл, **ИЛИ** `--split`: RGA `improcess` (crop+rotate за один проход, zero-copy чтение из DMA через `Handle2Fd` → `wrapbuffer_fd_t`)
+12. Очистка: `UnBind` → `DisableChn` → `StopGrp` → `DestroyGrp` → `StopPipe` → `DisableChnExt` → `DisableDev` → `SYS_Exit`
 
 #### Просмотр мега-кадра
 
@@ -1189,6 +1201,79 @@ ffmpeg -pix_fmt nv12 -s 3840x1080 -i mega_3840x1080_pts12345678_nv12.raw -f imag
 - **`bSyncPipe=1`** — если один сенсор отстаёт, весь пайплайн ждёт. Это гарантирует синхронность, но может вызвать timeout. Если таймаут — увеличьте `-t 5000`
 - **NOBLEND без калибровки** — программа пробует `AVS_PARAM_SOURCE_LUT` с пустой таблицей. Если `CreateGrp` падает, попробуйте `--calib /path/to/dummy.xml` (файл может быть пустым XML)
 - **LDCH** — программа выполняет `GetFinalLut` как rkipc, но для NOBLEND это может быть noop. Ошибки игнорируются
+
+#### `--split` и `--rotate-cam`: нарезка + поворот через RGA (zero-copy)
+
+Опция `--split` нарезает мега-кадр (3840×1080) на 2 отдельных файла камер через **RGA** — аппаратный 2D-движок Rockchip (`/dev/rga`, `librga.so`). Опция `--rotate-cam N` поворачивает каждую половинку на 0/90/180/270°. **Весь мега-кадр не крутится** — только отдельные половинки.
+
+**Пайплайн (zero-copy для источника):**
+
+```
+AVS mega-frame (DMA буфер rockit, MB_BLK)
+    ↓ RK_MPI_MB_Handle2Fd → dmabuf fd
+    ↓ wrapbuffer_fd_t (RGA читает из DMA через IOMMU, БЕЗ CPU virtual mapping)
+    ↓
+RGA improcess(src, dst, srect=crop, usage=rotation | IM_SYNC)
+    ↓ crop + rotate за ОДИН проход RGA (без промежуточного буфера)
+    ↓
+malloc буфер (RGA пишет через IOMMU)
+    ↓ fwrite → файл
+```
+
+**Почему zero-copy только для источника:**
+- Источник (мега-кадр) — в DMA буфере rockit. RGA читает через `dmabuf fd` напрямую из DMA через IOMMU, без CPU virtual mapping.
+- Назначение — `malloc` (CPU RAM). Для полного zero-copy нужен DMA pool, но для записи в файл (`fwrite`) всё равно нужен CPU. `splice()` из dmabuf в файл не всегда поддерживается.
+- **Crop + rotate за один проход** через `improcess()` — убрали промежуточный `half_buf` (был в первой версии).
+
+**Примеры:**
+
+```bash
+# Нарезать без поворота → 2 файла 1920×1080
+./vi_grab_avs -w 1920 -h 1080 --split
+# → mega0_1920x1080_pts123_nv12.raw  (cam0 = левая половина)
+# → mega1_1920x1080_pts123_nv12.raw  (cam1 = правая половина)
+
+# Портрет → 2 файла 1080×1920
+./vi_grab_avs -w 1920 -h 1080 --split --rotate-cam 90
+# → mega0_1080x1920_pts123_nv12.raw
+# → mega1_1080x1920_pts123_nv12.raw
+
+# Перевёрнутая камера → 2 файла 1920×1080
+./vi_grab_avs -w 1920 -h 1080 --split --rotate-cam 180
+```
+
+**Результаты на плате RV1126B:**
+
+![split rot=0 — cam0 (левая половина) + cam1 (правая половина), 1920×1080](docs/images/split_rot0.png)
+
+*`--split` без поворота: cam0 = левая половина мега-кадра, cam1 = правая. Каждая 1920×1080 NV12, 3.1MB.*
+
+![split rot=90 — портретный режим, 1080×1920](docs/images/split_rot90.png)
+
+*`--split --rotate-cam 90`: каждая половинка повёрнута на 90° через RGA. 1080×1920 (portrait).*
+
+![Все 3 поворота cam0: rot=0, rot=90, rot=180](docs/images/split_rotations.png)
+
+*cam0 при rot=0 (1920×1080), rot=90 (1080×1920), rot=180 (1920×1080). RGA аппаратный поворот.*
+
+**Лог:**
+
+```
+$ ./vi_grab_avs -w 1920 -h 1080 -s 3 -n 1 --split --rotate-cam 90 -v
+vi_grab_avs: 1920x1080 per sensor, mode=NOBLEND_HOR, sync=1, mega=3840x1080, skip=3, save=1, split=1, rot=90
+...
+Frame 3 [save]: 3840x1080 pts=5420661227us grab=31ms → split (rot=90)
+  [rga] cam0: crop=[0,0,1920,1080] → 1080x1920 rot=90 → mega0_1080x1920_pts5420661227_nv12.raw (3110400 bytes)
+  [rga] cam1: crop=[1920,0,1920,1080] → 1080x1920 rot=90 → mega1_1080x1920_pts5420661227_nv12.raw (3110400 bytes)
+Done: skipped=3, saved=1/1
+```
+
+**RGA детали:**
+- `librga.so.2.1.0` уже на плате (`/usr/lib/librga.so`)
+- `/dev/rga` — устройство RGA (hardware 2D engine)
+- Заголовки: `external/librga/im2d_api/` (im2d C API: `improcess`, `wrapbuffer_fd_t`)
+- Формат: `RK_FORMAT_YCbCr_420_SP` (NV12)
+- Crop + rotate: `improcess(src, dst, pat, srect, drect, prect, usage=ROT_90|IM_SYNC)` — один вызов RGA
 
 #### Файлы
 

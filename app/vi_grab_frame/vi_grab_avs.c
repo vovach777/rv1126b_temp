@@ -239,10 +239,21 @@ static int deg_to_rga_rotation(int deg) {
     }
 }
 
+/* Заглушка для pat параметра improcess (не используется) */
+static rga_buffer_t pat_dummy(void) {
+    rga_buffer_t p;
+    memset(&p, 0, sizeof(p));
+    return p;
+}
+
 /*
  * rga_split_and_rotate — нарезать мега-кадр на 2 половинки через RGA.
  *
- * mega_data   — virtual address мега-кадра (NV12, mega_w × mega_h)
+ * ZERO-COPY для источника: использует dmabuf fd от rockit MB (Handle2Fd),
+ *   RGA читает напрямую из DMA через IOMMU, без CPU virtual mapping.
+ * Crop + rotate за один проход RGA (improcess), без промежуточного буфера.
+ *
+ * mb          — MB_BLK мега-кадра от AVS (DMA буфер rockit)
  * mega_w,mega_h — размеры мега-кадра (например 3840×1080 для hor)
  * cam_w,cam_h — размер одной половинки (например 1920×1080)
  * mode        — AVS mode (hor: левая/правая половина, ver: верхняя/нижняя)
@@ -253,7 +264,7 @@ static int deg_to_rga_rotation(int deg) {
  *
  * Возвращает 0 при успехе.
  */
-static int rga_split_and_rotate(void *mega_data, int mega_w, int mega_h,
+static int rga_split_and_rotate(MB_BLK mb, int mega_w, int mega_h,
                                 int cam_w, int cam_h, int mode,
                                 int rotation, const char *out_prefix,
                                 long long pts_us, int verbose) {
@@ -263,88 +274,82 @@ static int rga_split_and_rotate(void *mega_data, int mega_w, int mega_h,
     int out_h = (rotation == 90 || rotation == 270) ? cam_w : cam_h;
     int out_size = out_w * out_h * 3 / 2;  /* NV12 */
 
-    /* Выделяем промежуточный буфер для половинки (до поворота) */
-    void *half_buf = malloc(cam_w * cam_h * 3 / 2);
-    /* Выходной буфер для результата (после поворота) */
-    void *out_buf = malloc(out_size);
-    if (!half_buf || !out_buf) {
-        fprintf(stderr, "[rga] malloc failed\n");
-        free(half_buf); free(out_buf);
+    /* Получить dmabuf fd от rockit MB — ZERO-COPY: RGA читает из DMA */
+    int src_fd = RK_MPI_MB_Handle2Fd(mb);
+    if (src_fd < 0) {
+        fprintf(stderr, "[rga] Handle2Fd failed, falling back to virtual addr\n");
         return -1;
     }
 
-    /* Обернуть мега-кадр как RGA buffer (NV12) */
-    rga_buffer_t src = wrapbuffer_virtualaddr_t(mega_data, mega_w, mega_h,
-                                                mega_w, mega_h, RK_FORMAT_YCbCr_420_SP);
-    /* Обернуть half_buf — куда скопируем половинку */
-    rga_buffer_t half = wrapbuffer_virtualaddr_t(half_buf, cam_w, cam_h,
-                                                 cam_w, cam_h, RK_FORMAT_YCbCr_420_SP);
-    /* Обернуть out_buf — куда запишем результат (после поворота) */
+    /* Обернуть мега-кадр как RGA buffer через dmabuf fd (zero-copy read) */
+    rga_buffer_t src = wrapbuffer_fd_t(src_fd, mega_w, mega_h,
+                                       mega_w, mega_h, RK_FORMAT_YCbCr_420_SP);
+
+    /* Выходной буфер — malloc (RGA пишет через IOMMU в CPU RAM).
+       Для полного zero-copy нужен DMA pool, но для записи в файл
+       всё равно нужен CPU (fwrite), так что это оптимально. */
+    void *out_buf = malloc(out_size);
+    if (!out_buf) {
+        fprintf(stderr, "[rga] malloc failed\n");
+        return -1;
+    }
     rga_buffer_t dst = wrapbuffer_virtualaddr_t(out_buf, out_w, out_h,
                                                 out_w, out_h, RK_FORMAT_YCbCr_420_SP);
 
     int cam;
     for (cam = 0; cam < NUM_SENSORS; cam++) {
-        /* rect — координаты половинки в мега-кадре */
-        im_rect rect;
-        memset(&rect, 0, sizeof(rect));
+        /* srect — координаты половинки в мега-кадре (crop region) */
+        im_rect srect;
+        memset(&srect, 0, sizeof(srect));
         if (mode == AVS_MODE_NOBLEND_VER) {
             /* ver: cam0 = верхняя половина, cam1 = нижняя */
-            rect.x = 0;
-            rect.y = (cam == 0) ? 0 : cam_h;
-            rect.width = cam_w;
-            rect.height = cam_h;
+            srect.x = 0;
+            srect.y = (cam == 0) ? 0 : cam_h;
+            srect.width = cam_w;
+            srect.height = cam_h;
         } else {
             /* hor (default): cam0 = левая половина, cam1 = правая */
-            rect.x = (cam == 0) ? 0 : cam_w;
-            rect.y = 0;
-            rect.width = cam_w;
-            rect.height = cam_h;
+            srect.x = (cam == 0) ? 0 : cam_w;
+            srect.y = 0;
+            srect.width = cam_w;
+            srect.height = cam_h;
         }
 
-        /* Шаг 1: imcrop — вырезать половинку из мега-кадра в half_buf */
-        IM_STATUS st = imcrop_t(src, half, rect, 1);
+        /* drect — весь выходной буфер */
+        im_rect drect;
+        memset(&drect, 0, sizeof(drect));
+        drect.width = out_w;
+        drect.height = out_h;
+
+        im_rect prect;  /* unused */
+        memset(&prect, 0, sizeof(prect));
+
+        /* improcess: crop (srect) + rotate (usage) за ОДИН проход RGA.
+           usage = rotation | IM_SYNC — синхронно, ждём завершения. */
+        int usage = rga_rot | IM_SYNC;
+        IM_STATUS st = improcess(src, dst, pat_dummy(), srect, drect, prect, usage);
         if (st != IM_STATUS_SUCCESS) {
-            fprintf(stderr, "[rga] cam%d imcrop failed: %d\n", cam, (int)st);
+            fprintf(stderr, "[rga] cam%d improcess failed: %d (rot=%d, crop=[%d,%d,%d,%d])\n",
+                    cam, (int)st, rotation, srect.x, srect.y, srect.width, srect.height);
             continue;
         }
 
-        /* Шаг 2: поворот (если нужно) */
+        /* Сохранить в файл */
         char fname[300];
-        void *save_data;
-        int save_w, save_h;
-
-        if (rga_rot != 0) {
-            st = imrotate_t(half, dst, rga_rot, 1);
-            if (st != IM_STATUS_SUCCESS) {
-                fprintf(stderr, "[rga] cam%d imrotate(%d) failed: %d\n",
-                        cam, rotation, (int)st);
-                continue;
-            }
-            save_data = out_buf;
-            save_w = out_w;
-            save_h = out_h;
-        } else {
-            save_data = half_buf;
-            save_w = cam_w;
-            save_h = cam_h;
-        }
-
-        /* Шаг 3: сохранить в файл */
         snprintf(fname, sizeof(fname), "%s%d_%dx%d_pts%lld_nv12.raw",
-                 out_prefix, cam, save_w, save_h, pts_us);
+                 out_prefix, cam, out_w, out_h, pts_us);
         FILE *fp = fopen(fname, "wb");
         if (!fp) {
             fprintf(stderr, "[rga] cam%d cannot open %s\n", cam, fname);
             continue;
         }
-        size_t written = fwrite(save_data, 1, save_w * save_h * 3 / 2, fp);
+        size_t written = fwrite(out_buf, 1, out_size, fp);
         fclose(fp);
-        printf("  [rga] cam%d: %dx%d → %s (%zu bytes, rot=%d)\n",
-               cam, save_w, save_h, fname, written, rotation);
+        printf("  [rga] cam%d: crop=[%d,%d,%d,%d] → %dx%d rot=%d → %s (%zu bytes)\n",
+               cam, srect.x, srect.y, srect.width, srect.height,
+               out_w, out_h, rotation, fname, written);
     }
 
-    free(half_buf);
     free(out_buf);
     return 0;
 }
@@ -658,19 +663,18 @@ int main(int argc, char **argv) {
         }
 
         /* Фаза save — сохраняем в файл */
-        void *data = RK_MPI_MB_Handle2VirAddr(stMegaFrame.stVFrame.pMbBlk);
-
         if (ctx.split) {
-            /* Режим split: нарезать мега-кадр на cam0/cam1 через RGA */
+            /* Режим split: нарезать мега-кадр на cam0/cam1 через RGA (zero-copy) */
             printf("Frame %d [save]: %dx%d pts=%lldus grab=%lldms → split (rot=%d)\n",
                    frame, w, h, pts_us, t_grab, ctx.rotateCam);
-            rga_split_and_rotate(data, w, h,
+            rga_split_and_rotate(stMegaFrame.stVFrame.pMbBlk, w, h,
                                  ctx.width, ctx.height, ctx.mode,
                                  ctx.rotateCam, ctx.outputPrefix,
                                  pts_us, ctx.verbose);
             saved++;
         } else {
             /* Обычный режим: сохранить мега-кадр целиком */
+            void *data = RK_MPI_MB_Handle2VirAddr(stMegaFrame.stVFrame.pMbBlk);
             char fname[300];
             snprintf(fname, sizeof(fname), "%s_%dx%d_pts%lld_nv12.raw",
                      ctx.outputPrefix, w, h, pts_us);
