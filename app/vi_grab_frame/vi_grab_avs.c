@@ -33,7 +33,8 @@
  *   -m, --mode      режим AVS: hor, ver, blend (по умолчанию hor)
  *   -c, --channel   VI channel id (по умолчанию 0 = MAINPATH)
  *   -o, --output    префикс файла (по умолчанию "mega")
- *   -n, --count     сколько мега-кадров (по умолчанию 1)
+ *   -n, --count     сколько мега-кадров сохранить (по умолчанию 1)
+ *   -s, --skip      отбросить первые N кадров (прогрев ISP/AVS, по умолчанию 0)
  *   -t, --timeout   таймаут GetChnFrame в мс (по умолчанию 2000)
  *   --calib         путь к калибровочному XML (для blend)
  *   --no-sync       отключить bSyncPipe (не рекомендуется)
@@ -73,6 +74,7 @@ typedef struct {
     int mode;          /* AVS_MODE_E */
     int channelId;
     int frameCount;
+    int skipFrames;
     int timeoutMs;
     int verbose;
     int bSyncPipe;
@@ -92,7 +94,8 @@ static void usage(const char *prog) {
         "  -m, --mode <MODE>   AVS mode: hor, ver, blend (default: hor)\n"
         "  -c, --channel <ID>  VI channel id (default: %d = MAINPATH)\n"
         "  -o, --output <PFX>  output file prefix (default: \"mega\")\n"
-        "  -n, --count <N>     number of mega-frames (default: %d)\n"
+        "  -n, --count <N>     number of mega-frames to save (default: %d)\n"
+        "  -s, --skip <N>      discard first N frames for ISP/AVS warmup (default: 0)\n"
         "  -t, --timeout <MS>  GetChnFrame timeout in ms (default: %d)\n"
         "  --calib <FILE>      calibration XML path (for blend mode)\n"
         "  --no-sync           disable bSyncPipe (not recommended)\n"
@@ -109,9 +112,10 @@ static void usage(const char *prog) {
         "Examples:\n"
         "  %s -w 1920 -h 1080\n"
         "  %s -w 1920 -h 1080 -m ver -n 10\n"
+        "  %s -w 1920 -h 1080 -s 5 -n 10   # skip 5 warmup, save 10\n"
         "  %s -w 1920 -h 1080 -m blend --calib /oem/usr/share/avs_calib/calib_file.xml\n",
         prog, DEFAULT_CHANNEL_ID, DEFAULT_FRAME_COUNT, DEFAULT_TIMEOUT_MS,
-        prog, prog, prog);
+        prog, prog, prog, prog);
 }
 
 static int parse_mode(const char *s) {
@@ -130,6 +134,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
         {"channel", required_argument, 0, 'c'},
         {"output",  required_argument, 0, 'o'},
         {"count",   required_argument, 0, 'n'},
+        {"skip",    required_argument, 0, 's'},
         {"timeout", required_argument, 0, 't'},
         {"calib",   required_argument, 0, 1000},
         {"no-sync", no_argument,       0, 1001},
@@ -144,6 +149,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     ctx->mode = AVS_MODE_NOBLEND_HOR;
     ctx->channelId = DEFAULT_CHANNEL_ID;
     ctx->frameCount = DEFAULT_FRAME_COUNT;
+    ctx->skipFrames = 0;
     ctx->timeoutMs = DEFAULT_TIMEOUT_MS;
     ctx->verbose = 0;
     ctx->bSyncPipe = 1;
@@ -151,7 +157,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     strcpy(ctx->outputPrefix, "mega");
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:h:m:c:o:n:t:v", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:h:m:c:o:n:s:t:v", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'w': ctx->width = atoi(optarg); break;
             case 'h': ctx->height = atoi(optarg); break;
@@ -164,6 +170,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
             case 'c': ctx->channelId = atoi(optarg); break;
             case 'o': strncpy(ctx->outputPrefix, optarg, sizeof(ctx->outputPrefix) - 1); break;
             case 'n': ctx->frameCount = atoi(optarg); break;
+            case 's': ctx->skipFrames = atoi(optarg); break;
             case 't': ctx->timeoutMs = atoi(optarg); break;
             case 1000: strncpy(ctx->calibFile, optarg, sizeof(ctx->calibFile) - 1); break;
             case 1001: ctx->bSyncPipe = 0; break;
@@ -225,8 +232,9 @@ int main(int argc, char **argv) {
                            ctx.mode == AVS_MODE_NOBLEND_VER ? "NOBLEND_VER" :
                            "BLEND";
 
-    printf("vi_grab_avs: %dx%d per sensor, mode=%s, sync=%d, mega=%dx%d, frames=%d\n",
-           ctx.width, ctx.height, mode_str, ctx.bSyncPipe, mega_w, mega_h, ctx.frameCount);
+    printf("vi_grab_avs: %dx%d per sensor, mode=%s, sync=%d, mega=%dx%d, skip=%d, save=%d\n",
+           ctx.width, ctx.height, mode_str, ctx.bSyncPipe, mega_w, mega_h,
+           ctx.skipFrames, ctx.frameCount);
 
     /* 1. Инициализация MPI */
     ret = RK_MPI_SYS_Init();
@@ -474,7 +482,9 @@ int main(int argc, char **argv) {
     printf("Waiting for mega-frames (sync=%d, this may take a few seconds)...\n",
            ctx.bSyncPipe);
 
-    for (frame = 0; frame < ctx.frameCount; frame++) {
+    int total = ctx.skipFrames + ctx.frameCount;
+    int saved = 0;
+    for (frame = 0; frame < total; frame++) {
         VIDEO_FRAME_INFO_S stMegaFrame;
         memset(&stMegaFrame, 0, sizeof(stMegaFrame));
 
@@ -490,15 +500,19 @@ int main(int argc, char **argv) {
         int w = stMegaFrame.stVFrame.u32Width;
         int h = stMegaFrame.stVFrame.u32Height;
         long long pts_us = (long long)stMegaFrame.stVFrame.u64PTS;
-        void *data = RK_MPI_MB_Handle2VirAddr(stMegaFrame.stVFrame.pMbBlk);
         int data_len = RK_MPI_MB_GetLength(stMegaFrame.stVFrame.pMbBlk);
 
-        if (ctx.verbose) {
-            printf("Frame %d: %dx%d pts=%lldus (%lldms) len=%d grab=%lldms\n",
-                   frame, w, h, pts_us, pts_us / 1000, data_len, t_grab);
+        /* Кадры из фазы skip — только release, без сохранения */
+        if (frame < ctx.skipFrames) {
+            if (ctx.verbose)
+                printf("Frame %d [skip]: %dx%d pts=%lldus grab=%lldms\n",
+                       frame, w, h, pts_us, t_grab);
+            RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+            continue;
         }
 
-        /* Сохранение в файл */
+        /* Фаза save — сохраняем в файл */
+        void *data = RK_MPI_MB_Handle2VirAddr(stMegaFrame.stVFrame.pMbBlk);
         char fname[300];
         snprintf(fname, sizeof(fname), "%s_%dx%d_pts%lld_nv12.raw",
                  ctx.outputPrefix, w, h, pts_us);
@@ -510,12 +524,14 @@ int main(int argc, char **argv) {
             int to_write = (data_len > 0) ? data_len : expected;
             size_t written = fwrite(data, 1, to_write, fp);
             fclose(fp);
-            printf("Frame %d: %dx%d pts=%lldus grab=%lldms → %s (%zu bytes)\n",
-                   frame, w, h, pts_us, t_grab, fname, written);
+            printf("Frame %d [save]: %dx%d pts=%lldus grab=%lldms len=%d → %s (%zu bytes)\n",
+                   frame, w, h, pts_us, t_grab, data_len, fname, written);
+            saved++;
         }
 
         RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
     }
+    printf("Done: skipped=%d, saved=%d/%d\n", ctx.skipFrames, saved, ctx.frameCount);
 
     /* 9. Cleanup */
 cleanup_bind:
