@@ -22,6 +22,293 @@ CLI-программы для стереокамеры на базе Rockchip RV
 
 ---
 
+## Пайплайн RV1126B: от камеры до оконечников (справочник)
+
+Чтобы не было путаницы между AVS, VPSS, RGA, VO, VOP и DRM — вот полный обзор аппаратных блоков и их связей на RV1126B. Все имена структур/enum соответствуют заголовкам в `external/rockit/mpi/sdk/include/`.
+
+### Аппаратные блоки (слева направо — путь кадра)
+
+```
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+│  Сенсор  │──▶│   CSI    │──▶│   CIF    │──▶│   ISP    │──▶│   VI     │
+│ GC2093   │   │  DPHY   │   │  rkcif   │   │  rkisp   │   │ (V4L2)   │
+│ MIPI     │   │          │   │          │   │          │   │          │
+└──────────┘   └──────────┘   └──────────┘   └──────────┘   └────┬─────┘
+                                                                  │
+                                                                  ▼
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+│   VENC   │◀──│  VPSS    │◀──│   AVS    │◀─┐│   RGA    │   │   VOP    │
+│ H.264/   │   │ scale/   │   │ stitch   │  ││ 2D blit  │   │  (VOP2)  │
+│ H.265/   │   │ crop/    │   │ blend/   │  ││ crop/    │   │          │
+│ JPEG     │   │ rotate   │   │ noblend  │  ││ rotate   │   │  layers  │
+└────┬─────┘   └────┬─────┘   └──────────┘  │└──────────┘   └────┬─────┘
+     │              │                       │                     │
+     ▼              ▼                       │                     ▼
+  bitstream     кадр в MB                  └── кадр из VI         │
+  (файл/сеть)   (для VO/NPU)                                      │
+                                                                 ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                    Физические интерфейсы вывода                      │
+│  HDMI │ MIPI DSI │ LVDS │ eDP │ DP │ BT.656 │ BT.1120 │ RGB │ LCD  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Что делает каждый блок
+
+| Блок | Расшифровка | Что делает | Аппаратный? |
+|------|-------------|------------|-------------|
+| **CSI/DPHY** | MIPI CSI-2 + D-PHY | Приём MIPI-потока с сенсора (тактирование, десериализация) | Да (DPHY0, DPHY3) |
+| **CIF** | Camera Interface Framework | Маршрутизация raw данных от CSI к ISP (`rkcif-mipi-lvds`, `/dev/media0`) | Да |
+| **ISP** | Image Signal Processor | Дебайеризация, AWB, AE, AF, HDR, LSC, денойз — всё что в IQ-файле (`/etc/iqfiles/gc2093_*.json`) | Да (`rkisp-vir0`, `rkisp-vir1`) |
+| **VI** | Video Input | V4L2-обёртка над ISP, отдаёт кадры в rockit через `RK_MPI_VI_GetChnFrame`. Каналы: MAINPATH (0), SELFPATH (1), FBC (2), NPU (4) | API над V4L2 |
+| **AVS** | Auto Video Stitching | Аппаратное сшивание N камер в один мега-кадр. Режимы: `NOBLEND_HOR/VER/QR/OVL`, `BLEND`, `BLEND_DYN`. Проекции: equirectangular, rectilinear, cylindrical, cube_map | Да (аппаратный блок) |
+| **VPSS** | Video Process Sub-System | Масштабирование, кроп, поворот, конверсия формата. Может работать на GPU, RGA, ISP или своём硬件 | Да/софт (через `enVProcDev`) |
+| **RGA** | Raster Graphic Acceleration | 2D blit: crop, rotate, scale, format convert, color fill. Работает с dmabuf через IOMMU (zero-copy). Не часть rockit — отдельная библиотека `librga.so` | Да (RGA2/RGA3) |
+| **VENC** | Video Encode | H.264/H.265/JPEG/MJPEG/ProRes кодирование. Rate control: CBR, VBR, AVBR, FIXQP. GOP: NORMALP, TSVC2-4, SMARTP | Да (аппаратный кодек) |
+| **VO** | Video Output | API над VOP2 — композиция слоёв и отправка на физический интерфейс (HDMI, MIPI, LVDS, ...) | API над VOP2 |
+| **VOP2** | Video Output Processor v2 | Аппаратный композитор: берёт слои (Cluster/Smart/Esmart), смешивает, выводит на дисплей | Да (аппаратный блок) |
+| **DRM/KMS** | Direct Rendering Manager | Linux-подсистема отображения. На RV1126B **VOP2 экспортируется через DRM** — rockit VO использует DRM под капотом | Linux subsystem |
+
+### Связи: bind-механизм rockit
+
+Компоненты соединяются через `RK_MPI_SYS_Bind(src, dst)` — это **zero-copy**: данные передаются как `MB_BLK` (дескриптор буфера), без копирования.
+
+```c
+MPP_CHN_S src = { .enModId = RK_ID_VI,   .s32DevId = 0, .s32ChnId = 0 };
+MPP_CHN_S dst = { .enModId = RK_ID_AVS,  .s32DevId = 0, .s32ChnId = 0 };
+RK_MPI_SYS_Bind(&src, &dst);  // VI[0,0] → AVS[0,0]
+```
+
+**Иерархия VO** (от кадра до пикселей на экране):
+
+```
+VIDEO_FRAME_INFO_S (кадр в MB_BLK)
+  → RK_MPI_VO_SendFrame(layer, chn, &frame, timeout)
+    → VO_CHN (канал: rect, rotation, alpha, priority) — позиция кадра на слое
+      → VO_LAYER (Cluster0/1, Smart0/1, Esmart0-3, Virtual0-3)
+        → VO_DEV (устройство: HDMI, MIPI, LVDS, ...)
+          → VOP2 (аппаратная композиция слоёв)
+            → DRM plane → CRTC → encoder → connector → физический выход
+```
+
+**Типы слоёв VO** (`VO_LAYER_MODE_E`):
+- `VO_LAYER_MODE_VIDEO` — видео-слой (аппаратное масштабирование, YUV)
+- `VO_LAYER_MODE_GRAPHIC` — графический слой (UI/OSD, RGB)
+- `VO_LAYER_MODE_CURSOR` — курсор
+- `VO_LAYER_MODE_VIRTUAL` — виртуальный (для WBC — write-back capture)
+
+**Режимы композиции** (`VO_SPLICE_MODE_E`):
+- `VO_SPLICE_MODE_GPU` — композиция через GPU
+- `VO_SPLICE_MODE_RGA` — композиция через RGA (используется в rkipc для multi-camera)
+
+### Буферы: MB (Memory Buffer) и zero-copy
+
+Все кадры в rockit — это `MB_BLK` (дескриптор буфера в общем пуле). Типы источников буферов (`MB_SOURCE_E`):
+
+| `MB_SOURCE_*` | Что значит | Когда использовать |
+|---------------|-----------|-------------------|
+| `COMMON` | Общий пул (разделяемый между модулями) | По умолчанию |
+| `MODULE` | Пул модуля (VENC/VO/... свой) | Изоляция |
+| `PRIVATE` | Приватный пул канала (`u32FrameBufCnt`) | Когда нужен свой размер/количество |
+| `USER` | Пользовательский буфер | Внешний dmabuf |
+
+**Внешний dmabuf (zero-copy с RGA/NPU)** — через `MB_EXT_CONFIG_S`:
+
+```c
+MB_EXT_CONFIG_S ext = {
+    .s32Fd      = dmabuf_fd,   // fd из /dev/dma_heap/
+    .pu8VirAddr = va,           // mmap'd адрес
+    .u64PhyAddr = 0,            // rockit получит из dmabuf
+    .u64Size    = size,
+    .pFreeCB    = NULL,         // не освобождает rockit — мы управляем
+};
+MB_BLK mb;
+RK_MPI_SYS_CreateMB(&mb, &ext);  // обернуть внешний dmabuf в MB_BLK
+// ... передать в VO/VPSS/VENC ...
+RK_MPI_SYS_Free(mb);             // освободить обёртку (не сам dmabuf!)
+```
+
+Это позволяет передавать кадр из RGA в VO **без CPU-копии** — rockit берёт dmabuf fd и отдаёт его VOP2 напрямую через IOMMU.
+
+### AVS vs VPSS vs RGA — в чём разница?
+
+Это частая путаница. Все три могут "склеивать" кадры, но **по-разному**:
+
+| | **AVS** | **VPSS** | **RGA** |
+|---|---|---|---|
+| **Что делает** | Сшивает N камер в панораму (geometric warp + blend) | Масштабирование/кроп/поворот одного кадра | 2D blit: crop, rotate, scale, format convert |
+| **Аппаратный блок** | AVS (отдельный) | VPSS/GPU/RGA (настраивается) | RGA2/RGA3 (отдельный) |
+| **Вход** | N pipe (по одному на камеру) | 1 кадр | 1-2 кадра (src + pat) |
+| **Выход** | 1 мега-кадр (панорама) | 1 кадр (масштабированный) | 1 кадр (преобразованный) |
+| **Синхронизация** | `bSyncPipe=1` — аппаратная синхронизация N камер | Нет | Нет |
+| **Blend** | Да (LUT-based, с калибровкой) | Нет | Нет (только alpha blend pat) |
+| **Warp/проекция** | Да (equirectangular, cylindrical, cube_map) | Нет | Нет |
+| **API** | `RK_MPI_AVS_*` (rockit) | `RK_MPI_VPSS_*` (rockit) | `improcess()` (librga, НЕ rockit) |
+| **Zero-copy** | Да (внутри rockit) | Да (внутри rockit) | Да (dmabuf fd через IOMMU) |
+| **Когда использовать** | Сшивание стерео/панорамы | Подготовка кадра для VENC/VO | Кастомная обработка вне rockit-пайплайна |
+
+**На этой плате** (RV1126B + 2× GC2093):
+- **AVS** используется для сшивания двух камер в мега-кадр 3840×1080 (`vi_grab_avs`, `vi_grab_avs_dma`)
+- **RGA** используется для нарезки мега-кадра на половинки + поворот (`vi_grab_avs --split`, `vi_grab_avs_dma`)
+- **VPSS** в наших программах не используется (нужен только для сложного масштабирования внутри rockit-пайплайна)
+
+### VO vs VOP2 vs DRM — в чём разница?
+
+| | **VO** | **VOP2** | **DRM/KMS** |
+|---|---|---|---|
+| **Уровень** | API (rockit MPI) | Аппаратный блок | Linux kernel subsystem |
+| **Что делает** | `RK_MPI_VO_SendFrame`, `RK_MPI_VO_BindLayer`, ... | Композиция слоёв → вывод на дисплей | Управление плоскостями/CRTC/encoder/connector |
+| **Зависимость** | Использует VOP2 под капотом | Экспортируется через DRM в Linux | Драйвер VOP2 регистрируется как DRM-драйвер |
+| **Слои** | `VO_LAYER_CLUSTER0-3`, `VO_LAYER_ESMART0-3`, `VO_LAYER_VIRTUAL0-3` | Cluster, Smart, Esmart (аппаратные) | DRM planes (primary, overlay, cursor) |
+| **Интерфейсы** | `VO_INTF_HDMI`, `VO_INTF_MIPI`, `VO_INTF_LVDS`, ... | Те же (аппаратно) | DRM connectors (HDMI, MIPI DSI, LVDS, ...) |
+
+**Иерархия на RV1126B:**
+```
+приложение
+  ↓ RK_MPI_VO_SendFrame()
+rockit VO (API)
+  ↓ ioctl()
+DRM/KMS (Linux kernel)
+  ↓ драйвер VOP2
+VOP2 (аппаратный композитор)
+  ↓
+HDMI / MIPI DSI / LVDS (физический выход)
+```
+
+**На RV1126B** (из rkipc `rv1126b_dual_ipc`):
+- `g_vo_dev_id = 3` — устройство VO (HDMI на этой плате)
+- `g_vo_layer_id = 0` — слой (Cluster0)
+- `VO_INTF_MIPI` — интерфейс (MIPI DSI для LCD-панели)
+- `VO_OUTPUT_DEFAULT` — тайминг определяется из DTS/device
+- `VO_LAYER_MODE_GRAPHIC` — графический слой (RGB888)
+- `VO_SPLICE_MODE_RGA` — композиция нескольких каналов через RGA
+- `ROTATION_90` — поворот для портретной LCD-панели
+
+### NPU (RKNN) — отдельный мир
+
+NPU **не часть rockit MPI** — нет заголовков `rk_mpi_npu.h` или `rk_comm_npu.h`. NPU доступен через отдельный **RKNN SDK** (`external/rknpu2/`).
+
+**Интеграция с rockit-пайплайном — через dmabuf (zero-copy):**
+
+```
+VI/AVS/VPSS → MB_BLK (кадр)
+  ↓ RK_MPI_MB_Handle2Fd(mb)
+dmabuf fd
+  ↓ rknn_tensor_mem.fd = dmabuf_fd
+RKNN inference (NPU читает через IOMMU, без CPU copy)
+  ↓ результаты (bounding boxes, классы)
+приложение (рисует OSD через RGN, или принимает решения)
+```
+
+`librga.so` (arm64) берётся из `external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/` — RGA используется и в rockit-пайплайне, и в RKNN-примерах для препроцессинга (resize кадра под вход NPU).
+
+### Полный пайплайн на этой плате (RV1126B + 2× GC2093)
+
+```
+GC2093 #1 (0x37)         GC2093 #2 (0x7e)
+  1920×1080 raw            1920×1080 raw
+       │                        │
+  DPHY0 → CSI2           DPHY3 → CSI2
+       │                        │
+  rkcif-mipi-lvds        rkcif-mipi-lvds2
+  /dev/media0            /dev/media1
+       │                        │
+  rkisp-vir0             rkisp-vir1
+  /dev/video22           /dev/video30
+  (ISP + 3A от           (ISP + 3A от
+   rkaiq_3A_server)       rkaiq_3A_server)
+       │                        │
+       ▼                        ▼
+  VI dev0/pipe0          VI dev1/pipe1
+  chn0 (MAINPATH)        chn0 (MAINPATH)
+  RK_FMT_YUV420SP        RK_FMT_YUV420SP
+       │                        │
+       └───────┬────────────────┘
+               ▼
+          AVS grp0 (bSyncPipe=1, NOBLEND_HOR)
+               │
+               ▼
+          AVS chn0 → мега-кадр 3840×1080 NV12
+               │
+               ├─→ [vi_grab_avs]      fwrite(malloc) → файл
+               │
+               ├─→ [vi_grab_avs --split]
+               │     RGA crop+rotate → malloc → файл (cam0, cam1)
+               │
+               ├─→ [vi_grab_avs_dma --action save]
+               │     RGA crop+rotate → DMA буфер → fwrite → файл
+               │
+               ├─→ [vi_grab_avs_dma --action vo]
+               │     RGA crop+rotate → DMA буфер → MB_EXT → VO → VOP2 → HDMI/LCD
+               │     (полный zero-copy: rockit dmabuf → RGA → DMA dmabuf → VOP2)
+               │
+               ├─→ [прямой bind AVS→VENC]  (как simple_vi_bind_avs_bind_venc)
+               │     AVS → VENC (H.264) → MP4/RTSP
+               │
+               └─→ [прямой bind AVS→VO]    (если не нужен RGA)
+                     AVS → VO (video layer) → VOP2 → HDMI
+```
+
+### Где что реализовано в SDK
+
+| Компонент | SDK путь | API |
+|-----------|----------|-----|
+| VI | `external/rockit/mpi/sdk/include/rk_mpi_vi.h` | `RK_MPI_VI_*` |
+| AVS | `external/rockit/mpi/sdk/include/rk_mpi_avs.h` | `RK_MPI_AVS_*` |
+| VPSS | `external/rockit/mpi/sdk/include/rk_mpi_vpss.h` | `RK_MPI_VPSS_*` |
+| VENC | `external/rockit/mpi/sdk/include/rk_mpi_venc.h` | `RK_MPI_VENC_*` |
+| VO | `external/rockit/mpi/sdk/include/rk_mpi_vo.h` | `RK_MPI_VO_*` |
+| SYS (bind, MB) | `external/rockit/mpi/sdk/include/rk_mpi_sys.h` | `RK_MPI_SYS_Bind`, `RK_MPI_SYS_CreateMB` |
+| RGA | `external/linux-rga/im2d_api/im2d.h` | `improcess()`, `wrapbuffer_fd_t()` (НЕ rockit) |
+| RKNN (NPU) | `external/rknpu2/include/` | `rknn_*` (НЕ rockit) |
+| ISP/3A | `external/camera_engine_rkaiq/` | `rk_aiq_*` (демон `rkaiq_3A_server`) |
+| DRM | Linux kernel (`/dev/dri/card0`) | `drmMode*` (libdrm, не используется напрямую) |
+
+### Ключевые структуры (шпаргалка)
+
+```c
+// Кадр в rockit
+VIDEO_FRAME_INFO_S {
+    VIDEO_FRAME_S stVFrame {
+        MB_BLK pMbBlk;              // дескриптор буфера (dmabuf внутри)
+        RK_U32  u32Width, u32Height;
+        RK_U32  u32VirWidth;        // stride (выравнивание)
+        PIXEL_FORMAT_E enPixelFormat; // RK_FMT_YUV420SP, RK_FMT_RGB888, ...
+        COMPRESS_MODE_E enCompressMode; // NONE, AFBC_16x16, RFBC_64x4
+        DYNAMIC_RANGE_E enDynamicRange; // SDR8, SDR10, HDR10, HLG
+        RK_U64  u64PTS;             // presentation timestamp (мкс)
+    };
+};
+
+// Канал для bind
+MPP_CHN_S {
+    MOD_ID_E enModId;   // RK_ID_VI, RK_ID_AVS, RK_ID_VPSS, RK_ID_VENC, RK_ID_VO
+    RK_S32   s32DevId;  // device/group id
+    RK_S32   s32ChnId;  // channel id
+};
+
+// Внешний dmabuf (zero-copy с RGA/NPU)
+MB_EXT_CONFIG_S {
+    RK_U8   *pu8VirAddr;  // mmap'd адрес
+    RK_U64   u64PhyAddr;  // 0 — rockit получит из dmabuf
+    RK_S32   s32Fd;       // dmabuf fd из /dev/dma_heap/
+    RK_U64   u64Size;
+    RK_MPI_MB_FREE_CB pFreeCB;  // NULL — rockit не освобождает
+};
+
+// Атрибуты VO layer
+VO_VIDEO_LAYER_ATTR_S {
+    RECT_S          stDispRect;    // позиция на экране
+    SIZE_S          stImageSize;   // размер canvas
+    RK_U32          u32DispFrmRt;  // fps
+    PIXEL_FORMAT_E  enPixFormat;   // RK_FMT_RGB888 / RK_FMT_YUV420SP
+    COMPRESS_MODE_E enCompressMode;
+    DYNAMIC_RANGE_E enDstDynamicRange;
+};
+```
+
+---
+
 ## Сборка
 
 Репозиторий **не включает SDK** — заголовки и `librockit.so` берутся из RV1126B SDK (см. [Источник](#источник)). Структура каталогов:
