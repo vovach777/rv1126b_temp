@@ -21,10 +21,30 @@ set(ROCKIT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../external/rockit" CACHE PATH "
 set(ROCKIT_INCLUDE_DIR "${ROCKIT_ROOT}/mpi/include")
 set(ROCKIT_LIB_DIR "${ROCKIT_ROOT}/lib/${LIB_ARCH_DIR}/${TARGET_CHIP}/linux")
 
+# === Пути к rkaiq (3A + camgroup) ===
+# Заголовки в SDK; библиотека librkaiq.so — в sysroot при cross-compile
+# или на устройстве /usr/lib/librkaiq.so
+# Переопределить: cmake -DRKAIQ_ROOT=/path/to/rkaiq/include ..
+set(RKAIQ_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../external/camera_engine_rkaiq/rkaiq/include"
+    CACHE PATH "rkaiq include root")
+set(RKAIQ_INCLUDE_DIRS
+    "${RKAIQ_ROOT}"
+    "${RKAIQ_ROOT}/uAPI2"
+    "${RKAIQ_ROOT}/common"
+    "${RKAIQ_ROOT}/algos"
+    "${RKAIQ_ROOT}/xcore"
+    "${RKAIQ_ROOT}/iq_parser"
+    "${RKAIQ_ROOT}/iq_parser_v2"
+    "${RKAIQ_ROOT}/isp"
+)
+# Библиотека: искать в ROCKIT_LIB_DIR или в системном пути sysroot
+set(RKAIQ_LIB_DIR "${ROCKIT_LIB_DIR}" CACHE PATH "rkaiq library dir (or sysroot /usr/lib)")
+
 message(STATUS "Target: ${TARGET_ARCH} / ${TARGET_CHIP}")
 message(STATUS "Rockit root: ${ROCKIT_ROOT}")
-message(STATUS "Include: ${ROCKIT_INCLUDE_DIR}")
-message(STATUS "Lib dir: ${ROCKIT_LIB_DIR}")
+message(STATUS "Rockit include: ${ROCKIT_INCLUDE_DIR}")
+message(STATUS "Rockit lib dir: ${ROCKIT_LIB_DIR}")
+message(STATUS "rkaiq include: ${RKAIQ_ROOT}")
 
 # === Cross-compile (если нужен) ===
 # Раскомментировать для cross-compile:
@@ -66,3 +86,15 @@ target_include_directories(vi_grab_avs_dma PRIVATE
 target_link_directories(vi_grab_avs_dma PRIVATE ${ROCKIT_LIB_DIR} ${LIB_RGA_PATH})
 target_link_libraries(vi_grab_avs_dma rockit rga m pthread)
 install(TARGETS vi_grab_avs_dma RUNTIME DESTINATION "bin")
+
+# stereo_demo — полная стерео-программа: camgroup (3A sync) + AVS + VPSS (crop fan-out)
+# Все настройки в коде/CLI — НЕ нужно патчить rkipc или системные ini-файлы.
+# Пайплайн: 2× GC2093 → camgroup → AVS (NOBLEND_HOR, bSyncPipe) → VPSS → 3 канала
+#   CHN0 = cam0 (crop left), CHN1 = cam1 (crop right), CHN2 = full stitch
+#   + EnableBackupFrame для snapshot через GetGrpFrame
+add_executable(stereo_demo stereo_demo.c)
+target_include_directories(stereo_demo PRIVATE
+    ${ROCKIT_INCLUDE_DIR} ${RKAIQ_INCLUDE_DIRS})
+target_link_directories(stereo_demo PRIVATE ${ROCKIT_LIB_DIR} ${RKAIQ_LIB_DIR})
+target_link_libraries(stereo_demo rockit rkaiq m pthread)
+install(TARGETS stereo_demo RUNTIME DESTINATION "bin")

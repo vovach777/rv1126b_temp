@@ -1616,9 +1616,10 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 - `app/vi_grab_frame/vi_grab_dual.c` — два сенсора одновременно (~300 строк)
 - `app/vi_grab_frame/vi_grab_avs.c` — **аппаратное сшивание через AVS** (~400 строк)
 - `app/vi_grab_frame/vi_grab_avs_dma.c` — AVS → RGA → DMA буфер (zero-copy, VO/rknn ready, ~500 строк)
+- `app/vi_grab_frame/stereo_demo.c` — **полная стерео-программа**: camgroup (3A sync) + AVS + VPSS crop (~600 строк)
 - `app/vi_grab_frame/dma_alloc.c` — выделение DMA буферов через `/dev/dma_heap/` (C-перевод SDK-примера)
 - `app/vi_grab_frame/dma_alloc.h` — заголовок
-- `app/vi_grab_frame/CMakeLists.txt` — сборка всех четырёх программ
+- `app/vi_grab_frame/CMakeLists.txt` — сборка всех пяти программ
 
 ## CLI: vi_grab_dual — одновременный захват с двух сенсоров
 
@@ -2862,6 +2863,144 @@ dma_buf_free(size, &fd, va);
 
 ---
 
+## CLI: stereo_demo — полная стерео-программа (camgroup + AVS + VPSS)
+
+`stereo_demo` — полноценная стерео-программа, которая **не требует патчей rkipc или системных ini-файлов**. Все настройки (camgroup, AVS, VPSS) задаются в коде и через CLI-аргументы.
+
+### Архитектура
+
+```mermaid
+flowchart TD
+    C0["Cam0 GC2093"] -->|raw| ISP0["ISP0\n(camgroup 3A sync)"]
+    C1["Cam1 GC2093"] -->|raw| ISP1["ISP1\n(camgroup 3A sync)"]
+    ISP0 -->|bind| AVS["AVS_GRP\nNOBLEND_HOR\nbSyncPipe=1\nLDCH\n5088×1520"]
+    ISP1 -->|bind| AVS
+    AVS -->|bind| VPSS["VPSS_GRP\nEnableBackupFrame\nVIDEO_PROC_DEV_VPSS"]
+
+    VPSS -->|"CHN0 crop=left\n0,0,2544,1520"| CAM0["Cam0\n2544×1520\n→ файл"]
+    VPSS -->|"CHN1 crop=right\n2544,0,2544,1520"| CAM1["Cam1\n2544×1520\n→ файл"]
+    VPSS -->|"CHN2 full\n(без crop)"| FULL["Full stitch\n5088×1520\n→ файл"]
+    VPSS -.->|"GetGrpFrame\n(backup)"| SNAP["Snapshot\n5088×1520\nобе камеры\nсинхронно"]
+```
+
+### Что делает программа
+
+1. **camgroup_init()** — `rk_aiq_uapi2_camgroup_create()` + `prepare()` + `start()`. Синхронизация AE/AWB между камерами. Опционально с group IQ файлом (`camgroup_gc2093_dual.json`) и overlap map.
+2. **vi_init()** — VI device + channels + StartPipe (group mode, как rkipc `rv1126b_dual_ipc`).
+3. **avs_init()** — AVS group с `NOBLEND_HOR` + `bSyncPipe=1` + LDCH. Сшивает две камеры в мега-кадр **без blend** (чисто для синхронизации и баланса).
+4. **vpss_init()** — VPSS group с 3 каналами:
+   - **CHN0**: crop левой половины (cam0)
+   - **CHN1**: crop правой половины (cam1)
+   - **CHN2**: полный stitch (без crop)
+   - **EnableBackupFrame**: для snapshot через `GetGrpFrame`
+5. **bind_init()** — VI → AVS → VPSS (через `RK_MPI_SYS_Bind`).
+6. **main loop** — `GetChnFrame` с каждого канала, сохранение в `.raw` файлы. Или `GetGrpFrame` для snapshot.
+
+### Зачем "сшивать чтобы разрезать"
+
+AVS используется **не как панорамный сшиватель**, а как:
+- **Аппаратный синхронизатор** (`bSyncPipe=1`) — обе камеры стримят одновременно, кадр N с cam0 и кадр N с cam1 попадают в AVS в одном такте
+- **Балансировщик** — group AWB/AE через camgroup даёт идентичные настройки 3A
+- **LDCH** — коррекция дисторсии до сшивания
+
+На выходе AVS — два кадра, гарантированно синхронных по времени, яркости, цвету и геометрии. VPSS crop разрезает их обратно на отдельные камеры.
+
+### Использование
+
+```bash
+# Базовый запуск (2× 1920×1080, сохранить обе камеры отдельно)
+./stereo_demo -w 1920 -h 1080 --save-cam0 --save-cam1 -n 10
+
+# С group IQ файлом (синхронизация AWB)
+./stereo_demo -w 1920 -h 1080 \
+  --iq-dir /oem/usr/share/iqfiles \
+  --group-iq camgroup_gc2093_dual.json \
+  --overlap-map srcOverlapMap.bin \
+  --save-cam0 --save-cam1 -n 10
+
+# Сохранить полный stitch
+./stereo_demo -w 1920 -h 1080 --save-full -n 10
+
+# Snapshot через GetGrpFrame (обе камеры в одном кадре, синхронно)
+./stereo_demo -w 1920 -h 1080 --snapshot
+
+# Без camgroup (только AVS sync, без 3A sync)
+./stereo_demo -w 1920 -h 1080 --no-camgroup --save-cam0 --save-cam1
+
+# Без LDCH (без коррекции дисторсии)
+./stereo_demo -w 1920 -h 1080 --no-ldch --save-cam0 --save-cam1
+
+# Подробный вывод
+./stereo_demo -w 1920 -h 1080 -v --save-cam0 --save-cam1
+```
+
+### Параметры
+
+| Параметр | Описание | По умолчанию |
+|----------|----------|--------------|
+| `-w, --width` | ширина одного сенсора (обязательно) | — |
+| `-h, --height` | высота одного сенсора (обязательно) | — |
+| `-n, --count` | сколько кадров сохранить | 1 |
+| `-s, --skip` | отбросить первые N кадров (прогрев) | 5 |
+| `--iq-dir` | путь к IQ-файлам | `/oem/usr/share/iqfiles` |
+| `--group-iq` | group IQ файл (camgroup.json) для AWB sync | — |
+| `--overlap-map` | overlap map файл (srcOverlapMap.bin) | — |
+| `--no-camgroup` | отключить camgroup (только AVS sync) | — |
+| `--no-sync` | отключить bSyncPipe | — |
+| `--no-ldch` | отключить LDCH | — |
+| `--save-cam0` | сохранять CHN0 (левая камера) | — |
+| `--save-cam1` | сохранять CHN1 (правая камера) | — |
+| `--save-full` | сохранять CHN2 (полный stitch) | — |
+| `--snapshot` | использовать GetGrpFrame | — |
+| `-o, --output` | префикс файла | `stereo` |
+| `-t, --timeout` | таймаут GetChnFrame (мс) | 2000 |
+| `-v, --verbose` | подробный вывод | — |
+
+### GetGrpFrame vs GetChnFrame
+
+| | `GetChnFrame` (channel) | `GetGrpFrame` (backup) |
+|---|---|---|
+| **Что возвращает** | Выходной кадр канала (после crop/scale) | Входной кадр (до crop/scale) |
+| **Размер** | Как в `chn_attr` (1920×1080) | Исходный (5088×1520) |
+| **Когда доступен** | Только если кадр прошёл через канал | Всегда, если `EnableBackupFrame` |
+| **Зачем** | Постоянный стрим из канала | Snapshot, одноразовый захват |
+| **Содержит** | Одну камеру (после crop) | Обе камеры (синхронно) |
+
+### Сборка
+
+```bash
+# stereo_demo требует librkaiq.so (3A + camgroup)
+# Получить с платы:
+scp root@10.0.55.160:/usr/lib/librkaiq.so lib/
+
+# Собрать:
+SDK_PATH=/path/to/sdk ./build.sh stereo_demo
+
+# Или через CMake:
+cd app/vi_grab_frame
+mkdir build && cd build
+cmake -DROCKIT_ROOT=../../../external/rockit ..
+make stereo_demo
+```
+
+### Зависимости
+
+| Библиотека | Откуда | Зачем |
+|-----------|--------|-------|
+| `librockit.so` | SDK (`external/rockit/lib/arm64/rv1126b/linux/`) | MPI: VI, AVS, VPSS, SYS |
+| `librkaiq.so` | Плата (`/usr/lib/librkaiq.so`) или собрать из SDK | 3A + camgroup |
+| `librga.so` | SDK или плата | (не нужна для stereo_demo, только для vi_grab_avs) |
+
+> **Важно:** `stereo_demo` **не нуждается** в `rkaiq_3A_server` (демоне). Программа сама вызывает `rk_aiq_uapi2_camgroup_create()` — 3A работает in-process. Убедитесь, что `S40rkaiq_3A` НЕ запущен (см. [3A сервер vs rkipc](#3a-сервер-vs-rkipc--кто-управляет-isp)).
+
+### Файлы
+
+- `app/vi_grab_frame/stereo_demo.c` — исходник (~600 строк)
+- `app/vi_grab_frame/CMakeLists.txt` — target `stereo_demo`
+- `build.sh` — поддержка `stereo_demo` (автодетект rkaiq headers)
+
+---
+
 ## Три пути стерео-склейки на RV1126B (сводка)
 
 Из документации Rockchip и SDK есть **три принципиальных пути** аппаратного склеивания кадров с двух камер. На этой плате (RV1126B + 2× GC2093) **работает только Путь 3**.
@@ -3406,7 +3545,9 @@ rkadk_dual_disp_test -W 256 -H 0 -g 8 -s 0
 │   └── vi_grab_frame/      # наши CLI-программы
 │       ├── vi_grab_frame.c     # захват одного сенсора
 │       ├── vi_grab_avs.c       # AVS мега-кадр + --split + --rotate-cam (RGA)
-│       └── vi_grab_dual.c      # захват двух сенсоров без AVS
+│       ├── vi_grab_avs_dma.c   # AVS → RGA → DMA (zero-copy, VO)
+│       ├── vi_grab_dual.c      # захват двух сенсоров без AVS
+│       └── stereo_demo.c       # camgroup (3A sync) + AVS + VPSS crop
 ├── docs/                   # картинки для README
 │   └── images/
 │       ├── split_rot0.png          # --split без поворота
