@@ -136,21 +136,178 @@ RK_MPI_SYS_Free(mb);             // освободить обёртку (не с
 
 | | **AVS** | **VPSS** | **RGA** |
 |---|---|---|---|
-| **Что делает** | Сшивает N камер в панораму (geometric warp + blend) | Масштабирование/кроп/поворот одного кадра | 2D blit: crop, rotate, scale, format convert |
-| **Аппаратный блок** | AVS (отдельный) | VPSS/GPU/RGA (настраивается) | RGA2/RGA3 (отдельный) |
-| **Вход** | N pipe (по одному на камеру) | 1 кадр | 1-2 кадра (src + pat) |
-| **Выход** | 1 мега-кадр (панорама) | 1 кадр (масштабированный) | 1 кадр (преобразованный) |
+| **Что делает** | Сшивает N камер в панораму (geometric warp + blend) | Масштабирование/кроп/поворот одного кадра, **fan-out** на N каналов | 2D blit: crop, rotate, scale, format convert |
+| **Аппаратный блок** | AVS (отдельный) | VPSS/GPU/RGA (настраивается через `enVProcDev`) | RGA2/RGA3 (отдельный) |
+| **Вход** | N pipe (по одному на камеру) | 1 кадр → **до 4 каналов** (VPSS_CHN0-3) | 1-2 кадра (src + pat) |
+| **Выход** | 1 мега-кадр (панорама) | **N кадров** (разные разрешения/форматы из одного источника!) | 1 кадр (преобразованный) |
 | **Синхронизация** | `bSyncPipe=1` — аппаратная синхронизация N камер | Нет | Нет |
 | **Blend** | Да (LUT-based, с калибровкой) | Нет | Нет (только alpha blend pat) |
 | **Warp/проекция** | Да (equirectangular, cylindrical, cube_map) | Нет | Нет |
 | **API** | `RK_MPI_AVS_*` (rockit) | `RK_MPI_VPSS_*` (rockit) | `improcess()` (librga, НЕ rockit) |
 | **Zero-copy** | Да (внутри rockit) | Да (внутри rockit) | Да (dmabuf fd через IOMMU) |
-| **Когда использовать** | Сшивание стерео/панорамы | Подготовка кадра для VENC/VO | Кастомная обработка вне rockit-пайплайна |
+| **Когда использовать** | Сшивание стерео/панорамы | Подготовка кадра для VENC/VO/NPU **внутри rockit-пайплайна** | Кастомная обработка **вне** rockit-пайплайна |
+
+### VPSS vs RGA — детальный разбор
+
+VPSS и RGA **пересекаются по функциональности** (оба делают scale/crop/rotate), но это **разные инструменты для разных задач**.
+
+#### Что умеет VPSS (и RGA не умеет)
+
+| Возможность VPSS | RGA | Комментарий |
+|------------------|-----|-------------|
+| **Fan-out: 1 вход → 4 выхода** одновременно | ❌ | VPSS group имеет до 4 каналов (`VPSS_CHN0-3`), каждый со своим разрешением/форматом. RGA делает 1 blit за вызов. |
+| **Интеграция в rockit bind-пайплайн** | ❌ | VPSS — полноценный узел `RK_MPI_SYS_Bind(VI→VPSS, VPSS→VENC, VPSS→VO)`. RGA — вне rockit, вызывается вручную. |
+| **`VIDEO_PROC_DEV_VPSS`** — аппаратный VPSS-блок | ❌ | На чипах с аппаратным VPSS (RK3588) — отдельный блок. На RV1126B его нет, используется GPU/RGA. |
+| **`VIDEO_PROC_DEV_GPU`** — обработка через GPU | ❌ | VPSS может делегировать на GPU (медленнее RGA, но гибче). |
+| **`VIDEO_PROC_DEV_ISP`** — обработка через ISP | ❌ | VPSS может использовать ISP для scaling (только на некоторых чипах). |
+| **`COMPRESS_RFBC_64x4`** — аппаратное сжатие | ❌ | VPSS умеет AFBC/RFBC compression для экономии памяти. RGA — нет. |
+| **`ASPECT_RATIO_AUTO/MANUAL`** — aspect ratio с letterbox | ❌ | VPSS сам считает прямоугольник с сохранением пропорций. RGA — нет, нужно считать вручную. |
+| **`EnableBackupFrame`** — буфер последнего кадра | ❌ | VPSS хранит последний кадр, можно получить даже если источник остановился. |
+| **`GetRegionLuma`** — измерение яркости региона | ❌ | VPSS может отдавать статистику яркости без полного чтения кадра. |
+| **`SetGrpDelay`** — задержка пайплайна | ❌ | VPSS может буферизовать кадры для выравнивания таймингов. |
+| **`AttachMbPool`** — свой пул буферов на канал | частично | VPSS может использовать общий пул для нескольких потребителей. |
+| **`AIISP_ATTR_S`** — AI-ISP обработка | ❌ | VPSS может применять AI-модель для улучшения изображения. |
+
+#### Что умеет RGA (и VPSS не умеет)
+
+| Возможность RGA | VPSS | Комментарий |
+|-----------------|------|-------------|
+| **`improcess()` — синхронный 2D blit** | нет | RGA вызывается напрямую: `improcess(src, dst, ...)` — один вызов, один кадр. VPSS — асинхронный пайплайн. |
+| **`wrapbuffer_fd_t()` — любой dmabuf fd** | нет | RGA принимает **любой** dmabuf (из `/dev/dma_heap/`, от NPU, от GPU, от rockit). VPSS — только rockit MB_BLK. |
+| **Alpha blend (src over pat)** | нет | RGA может накладывать pat-буфер с alpha-смешиванием. VPSS — нет. |
+| **Color fill / color key** | нет | RGA может заливать регион цветом, делать key-color transparency. |
+| **Произвольный crop rect** | да | RGA: `srect` — любой прямоугольник. VPSS: `SetChnCrop` — тоже crop, но в рамках канала. |
+| **Поворот 90/180/270** | да | Оба умеют. RGA: `IM_HAL_TRANSFORM_ROT_90`. VPSS: `SetChnRotation(ROTATION_90)`. |
+| **Зеркальное отражение** | да | RGA: `IM_HAL_TRANSFORM_FLIP_H/V`. VPSS: `bMirror`, `bFlip`. |
+| **Работа вне rockit** | нет | RGA можно использовать без `RK_MPI_SYS_Init()`. VPSS — только внутри rockit. |
+| **`IM_SYNC` / `IM_ASYNC`** — режим вызова | нет | RGA может работать синхронно (ждать завершения) или асинхронно (callback). VPSS — всегда асинхронный пайплайн. |
+
+#### Когда выбирать VPSS
+
+**VPSS — это "разветвитель" пайплайна.** Главная фишка: **1 вход → 4 выхода** с разными разрешениями.
+
+```
+                ┌─ VPSS_CHN0 (1920×1080) → VENC0 (H.264 main stream)
+                │
+VI → VPSS_GRP ──┼─ VPSS_CHN1 (640×360)   → VENC1 (H.264 sub stream)
+                │
+                ├─ VPSS_CHN2 (256×144)   → NPU (детекция объектов)
+                │
+                └─ VPSS_CHN3 (1920×1080) → VO (дисплей)
+```
+
+**Пример из rkipc** (`rv1126b_ipc/video.c`):
+```c
+// Один VPSS group, 4 канала — каждый со своим разрешением
+stVpssGrpAttr.u32MaxW = 4096;
+stVpssGrpAttr.u32MaxH = 4096;
+stVpssGrpAttr.enPixelFormat = RK_FMT_YUV420SP;
+stVpssGrpAttr.enVProcDev = VIDEO_PROC_DEV_VPSS;  // или GPU, или RGA
+
+// CHN0 → VENC0 (main stream, 1080p)
+stVpssChnAttr[0].u32Width = 1920;
+stVpssChnAttr[0].u32Height = 1080;
+
+// CHN1 → VENC1 (sub stream, 360p)
+stVpssChnAttr[1].u32Width = 640;
+stVpssChnAttr[1].u32Height = 360;
+
+// CHN2 → NPU (детекция, 144p)
+stVpssChnAttr[2].u32Width = 256;
+stVpssChnAttr[2].u32Height = 144;
+
+// CHN3 → VO (дисплей, 1080p)
+stVpssChnAttr[3].u32Width = 1920;
+stVpssChnAttr[3].u32Height = 1080;
+```
+
+**Выбирайте VPSS когда:**
+1. **Нужно несколько разрешений одновременно** — main stream 1080p + sub stream 360p + NPU 144p. VPSS делает это за один проход, RGA потребует 3 вызова.
+2. **Нужна интеграция в rockit bind-пайплайн** — `RK_MPI_SYS_Bind(VI→VPSS, VPSS→VENC)`. RGA нельзя забиндить.
+3. **Нужно AFBC/RFBC сжатие** — экономия полосы памяти на 4K.
+4. **Нужен aspect ratio с letterbox** — VPSS сам считает, RGA — нет.
+5. **Нужна статистика яркости** (`GetRegionLuma`) — для автоэкспозиции.
+6. **Нужен AI-ISP** — AI-улучшение изображения.
+
+#### Когда выбирать RGA
+
+**RGA — это "ручной 2D-процессор".** Главная фишка: **работает с любым dmabuf, вне rockit**.
+
+```
+           ┌─ malloc (CPU RAM) ──── fwrite → файл
+           │
+rockit MB ─┼─ DMA буфер (/dev/dma_heap/) ── VO (zero-copy)
+           │
+           └─ NPU dmabuf ── rknn inference
+```
+
+**Пример из `vi_grab_avs_dma.c`:**
+```c
+// src — dmabuf fd от rockit (AVS мега-кадр)
+int src_fd = RK_MPI_MB_Handle2Fd(mb);
+rga_buffer_t src = wrapbuffer_fd_t(src_fd, mega_w, mega_h, ...);
+
+// dst — DMA буфер из /dev/dma_heap/ (НЕ rockit!)
+dma_buf_alloc("/dev/dma_heap/system-uncached", size, &dst_fd, &dst_va);
+rga_buffer_t dst = wrapbuffer_fd_t(dst_fd, out_w, out_h, ...);
+
+// Один вызов — crop + rotate
+im_rect srect = { .x = cam_w, .y = 0, .width = cam_w, .height = cam_h };
+im_rect drect = { .width = out_w, .height = out_h };
+improcess(src, dst, pat, srect, drect, prect, IM_HAL_TRANSFORM_ROT_90 | IM_SYNC);
+
+// dst_fd теперь можно отправить в VO (MB_EXT) или NPU (rknn_set_io_mem)
+```
+
+**Выбирайте RGA когда:**
+1. **Нужна обработка вне rockit-пайплайна** — наш `vi_grab_avs` берёт кадр из AVS, режет на 2 половинки, сохраняет в файл. VPSS так не умеет.
+2. **Нужно передать кадр в NPU** — RGA режет/масштабирует в dmabuf, NPU читает через `rknn_set_io_mem`. VPSS отдаёт только rockit MB_BLK.
+3. **Нужны alpha-blend / color key / color fill** — наложение OSD, логотипа, прозрачности.
+4. **Нужна синхронная обработка** — `improcess(..., IM_SYNC)` ждёт завершения. VPSS — асинхронный.
+5. **Нужен произвольный dmabuf** — из `/dev/dma_heap/`, от GPU, от другого процесса. VPSS — только rockit.
+6. **Простая операция над одним кадром** — crop + rotate. Создавать VPSS group ради одного кадра — оверкилл.
+
+#### VPSS на RV1126B — особенность
+
+На RV1126B **нет аппаратного VPSS-блока** (в отличие от RK3588). Поэтому `enVProcDev` может быть:
+- `VIDEO_PROC_DEV_RGA` — VPSS использует RGA под капотом (по умолчанию)
+- `VIDEO_PROC_DEV_GPU` — VPSS использует GPU
+- `VIDEO_PROC_DEV_VPSS` — на RV1126B может не работать (нет железа)
+
+Это значит, что на RV1126B **VPSS — это обёртка над RGA**, но с добавленной логикой:
+- fan-out на 4 канала
+- bind-интеграция с rockit
+- AFBC/RFBC compression
+- aspect ratio
+- backup frame
+
+**Производительность**: прямой вызов RGA (`improcess`) быстрее, чем VPSS→RGA (меньше прослоек). Но VPSS удобнее для сложного пайплайна.
+
+#### Сводная таблица: VPSS vs RGA
+
+| Критерий | **VPSS** | **RGA** |
+|----------|----------|---------|
+| **Где живёт** | Внутри rockit (`librockit.so`) | Отдельная библиотека (`librga.so`) |
+| **API** | `RK_MPI_VPSS_*` (rockit MPI) | `improcess()`, `wrapbuffer_fd_t()` (im2d) |
+| **Вход** | `RK_MPI_VPSS_SendFrame` (rockit MB_BLK) | `wrapbuffer_fd_t(dmabuf_fd, ...)` (любой dmabuf) |
+| **Выход** | `RK_MPI_VPSS_GetChnFrame` (rockit MB_BLK) | `rga_buffer_t dst` (любой dmabuf) |
+| **Fan-out** | **1 → 4 канала** (разные разрешения) | 1 → 1 (один blit за вызов) |
+| **Bind** | `RK_MPI_SYS_Bind(VI→VPSS, VPSS→VENC)` | нет (вне rockit) |
+| **Аппаратный блок** | На RV1126B — **использует RGA** под капотом | RGA2/RGA3 напрямую |
+| **Compression** | AFBC_16x16, RFBC_64x4 | нет |
+| **Aspect ratio** | `ASPECT_RATIO_AUTO/MANUAL` (auto letterbox) | вручную |
+| **Alpha blend** | нет | да (src over pat) |
+| **Color fill / key** | нет | да |
+| **Синхронность** | Асинхронный пайплайн | `IM_SYNC` (синхро) или `IM_ASYNC` (callback) |
+| **NPU integration** | Только через rockit MB_BLK | **Напрямую** (`rknn_set_io_mem.fd = dmabuf_fd`) |
+| **Вне rockit** | ❌ (нужен `RK_MPI_SYS_Init`) | ✅ (можно без rockit) |
+| **Оверхед** | Больше (слои rockit) | Меньше (прямой вызов) |
+| **Когда использовать** | Multi-resolution fan-out в rockit-пайплайне | Кастомная обработка, NPU, вне rockit |
 
 **На этой плате** (RV1126B + 2× GC2093):
-- **AVS** используется для сшивания двух камер в мега-кадр 3840×1080 (`vi_grab_avs`, `vi_grab_avs_dma`)
-- **RGA** используется для нарезки мега-кадра на половинки + поворот (`vi_grab_avs --split`, `vi_grab_avs_dma`)
-- **VPSS** в наших программах не используется (нужен только для сложного масштабирования внутри rockit-пайплайна)
+- **AVS** — сшивание двух камер в мега-кадр 3840×1080 (`vi_grab_avs`, `vi_grab_avs_dma`)
+- **RGA** — нарезка мега-кадра на половинки + поворот (`vi_grab_avs --split`, `vi_grab_avs_dma`)
+- **VPSS** — **не используется** в наших программах. Был бы нужен если бы мы делали IPC-пайплайн (main+sub stream + NPU + display из одного кадра). rkipc использует VPSS именно так.
 
 ### VO vs VOP2 vs DRM — в чём разница?
 
