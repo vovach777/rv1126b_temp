@@ -35,6 +35,8 @@
  *   -o, --output    префикс файла (по умолчанию "mega")
  *   -n, --count     сколько мега-кадров сохранить (по умолчанию 1)
  *   -s, --skip      отбросить первые N кадров (прогрев ISP/AVS, по умолчанию 0)
+ *   --split         нарезать мега-кадр на 2 файла (cam0, cam1) через RGA
+ *   --rotate-cam N  повернуть каждую половинку в RGA: 0/90/180/270 (по умолчанию 0)
  *   -t, --timeout   таймаут GetChnFrame в мс (по умолчанию 2000)
  *   --calib         путь к калибровочному XML (для blend)
  *   --no-sync       отключить bSyncPipe (не рекомендуется)
@@ -61,6 +63,10 @@
 #include "rk_mpi_sys.h"
 #include "rk_mpi_cal.h"
 
+/* RGA (2D hardware accelerator) for split/rotate */
+#include "im2d.h"
+#include "rga.h"
+
 #define DEFAULT_TIMEOUT_MS  2000
 #define DEFAULT_CHANNEL_ID  0    /* RKISP_MAINPATH */
 #define DEFAULT_FRAME_COUNT 1
@@ -75,6 +81,8 @@ typedef struct {
     int channelId;
     int frameCount;
     int skipFrames;
+    int split;         /* 1 = нарезать мега-кадр на cam0/cam1 через RGA */
+    int rotateCam;     /* 0/90/180/270 — поворот каждой половинки в RGA */
     int timeoutMs;
     int verbose;
     int bSyncPipe;
@@ -96,6 +104,8 @@ static void usage(const char *prog) {
         "  -o, --output <PFX>  output file prefix (default: \"mega\")\n"
         "  -n, --count <N>     number of mega-frames to save (default: %d)\n"
         "  -s, --skip <N>      discard first N frames for ISP/AVS warmup (default: 0)\n"
+        "  --split             split mega-frame into cam0/cam1 files via RGA\n"
+        "  --rotate-cam <DEG>  rotate each half in RGA: 0/90/180/270 (default: 0)\n"
         "  -t, --timeout <MS>  GetChnFrame timeout in ms (default: %d)\n"
         "  --calib <FILE>      calibration XML path (for blend mode)\n"
         "  --no-sync           disable bSyncPipe (not recommended)\n"
@@ -113,9 +123,11 @@ static void usage(const char *prog) {
         "  %s -w 1920 -h 1080\n"
         "  %s -w 1920 -h 1080 -m ver -n 10\n"
         "  %s -w 1920 -h 1080 -s 5 -n 10   # skip 5 warmup, save 10\n"
+        "  %s -w 1920 -h 1080 --split      # save cam0_*.raw + cam1_*.raw (1920x1080 each)\n"
+        "  %s -w 1920 -h 1080 --split --rotate-cam 90  # cam0/cam1 rotated to 1080x1920\n"
         "  %s -w 1920 -h 1080 -m blend --calib /oem/usr/share/avs_calib/calib_file.xml\n",
         prog, DEFAULT_CHANNEL_ID, DEFAULT_FRAME_COUNT, DEFAULT_TIMEOUT_MS,
-        prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog);
 }
 
 static int parse_mode(const char *s) {
@@ -136,8 +148,10 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
         {"count",   required_argument, 0, 'n'},
         {"skip",    required_argument, 0, 's'},
         {"timeout", required_argument, 0, 't'},
-        {"calib",   required_argument, 0, 1000},
-        {"no-sync", no_argument,       0, 1001},
+        {"calib",      required_argument, 0, 1000},
+        {"no-sync",    no_argument,       0, 1001},
+        {"split",      no_argument,       0, 1002},
+        {"rotate-cam", required_argument, 0, 1003},
         {"verbose", no_argument,       0, 'v'},
         {"help",    no_argument,       0, '?'},
         {0, 0, 0, 0}
@@ -150,6 +164,8 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     ctx->channelId = DEFAULT_CHANNEL_ID;
     ctx->frameCount = DEFAULT_FRAME_COUNT;
     ctx->skipFrames = 0;
+    ctx->split = 0;
+    ctx->rotateCam = 0;
     ctx->timeoutMs = DEFAULT_TIMEOUT_MS;
     ctx->verbose = 0;
     ctx->bSyncPipe = 1;
@@ -174,6 +190,16 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
             case 't': ctx->timeoutMs = atoi(optarg); break;
             case 1000: strncpy(ctx->calibFile, optarg, sizeof(ctx->calibFile) - 1); break;
             case 1001: ctx->bSyncPipe = 0; break;
+            case 1002: ctx->split = 1; break;
+            case 1003: {
+                int r = atoi(optarg);
+                if (r != 0 && r != 90 && r != 180 && r != 270) {
+                    fprintf(stderr, "Invalid --rotate-cam: %d (use 0/90/180/270)\n", r);
+                    return -1;
+                }
+                ctx->rotateCam = r;
+                break;
+            }
             case 'v': ctx->verbose = 1; break;
             case '?':
             default:
@@ -201,6 +227,126 @@ static long long get_now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+/* Преобразовать градусы в RGA rotation flag */
+static int deg_to_rga_rotation(int deg) {
+    switch (deg) {
+        case 90:  return IM_HAL_TRANSFORM_ROT_90;
+        case 180: return IM_HAL_TRANSFORM_ROT_180;
+        case 270: return IM_HAL_TRANSFORM_ROT_270;
+        default:  return 0;
+    }
+}
+
+/*
+ * rga_split_and_rotate — нарезать мега-кадр на 2 половинки через RGA.
+ *
+ * mega_data   — virtual address мега-кадра (NV12, mega_w × mega_h)
+ * mega_w,mega_h — размеры мега-кадра (например 3840×1080 для hor)
+ * cam_w,cam_h — размер одной половинки (например 1920×1080)
+ * mode        — AVS mode (hor: левая/правая половина, ver: верхняя/нижняя)
+ * rotation    — 0/90/180/270 — поворот каждой половинки в RGA
+ * out_prefix  — префикс имени файла (будут <prefix>0_*.raw, <prefix>1_*.raw)
+ * pts_us      — PTS для имени файла
+ * verbose
+ *
+ * Возвращает 0 при успехе.
+ */
+static int rga_split_and_rotate(void *mega_data, int mega_w, int mega_h,
+                                int cam_w, int cam_h, int mode,
+                                int rotation, const char *out_prefix,
+                                long long pts_us, int verbose) {
+    int rga_rot = deg_to_rga_rotation(rotation);
+    /* Выходной размер после поворота */
+    int out_w = (rotation == 90 || rotation == 270) ? cam_h : cam_w;
+    int out_h = (rotation == 90 || rotation == 270) ? cam_w : cam_h;
+    int out_size = out_w * out_h * 3 / 2;  /* NV12 */
+
+    /* Выделяем промежуточный буфер для половинки (до поворота) */
+    void *half_buf = malloc(cam_w * cam_h * 3 / 2);
+    /* Выходной буфер для результата (после поворота) */
+    void *out_buf = malloc(out_size);
+    if (!half_buf || !out_buf) {
+        fprintf(stderr, "[rga] malloc failed\n");
+        free(half_buf); free(out_buf);
+        return -1;
+    }
+
+    /* Обернуть мега-кадр как RGA buffer (NV12) */
+    rga_buffer_t src = wrapbuffer_virtualaddr_t(mega_data, mega_w, mega_h,
+                                                mega_w, mega_h, RK_FORMAT_YCbCr_420_SP);
+    /* Обернуть half_buf — куда скопируем половинку */
+    rga_buffer_t half = wrapbuffer_virtualaddr_t(half_buf, cam_w, cam_h,
+                                                 cam_w, cam_h, RK_FORMAT_YCbCr_420_SP);
+    /* Обернуть out_buf — куда запишем результат (после поворота) */
+    rga_buffer_t dst = wrapbuffer_virtualaddr_t(out_buf, out_w, out_h,
+                                                out_w, out_h, RK_FORMAT_YCbCr_420_SP);
+
+    int cam;
+    for (cam = 0; cam < NUM_SENSORS; cam++) {
+        /* rect — координаты половинки в мега-кадре */
+        im_rect rect;
+        memset(&rect, 0, sizeof(rect));
+        if (mode == AVS_MODE_NOBLEND_VER) {
+            /* ver: cam0 = верхняя половина, cam1 = нижняя */
+            rect.x = 0;
+            rect.y = (cam == 0) ? 0 : cam_h;
+            rect.width = cam_w;
+            rect.height = cam_h;
+        } else {
+            /* hor (default): cam0 = левая половина, cam1 = правая */
+            rect.x = (cam == 0) ? 0 : cam_w;
+            rect.y = 0;
+            rect.width = cam_w;
+            rect.height = cam_h;
+        }
+
+        /* Шаг 1: imcrop — вырезать половинку из мега-кадра в half_buf */
+        IM_STATUS st = imcrop_t(src, half, rect, 1);
+        if (st != IM_STATUS_SUCCESS) {
+            fprintf(stderr, "[rga] cam%d imcrop failed: %d\n", cam, (int)st);
+            continue;
+        }
+
+        /* Шаг 2: поворот (если нужно) */
+        char fname[300];
+        void *save_data;
+        int save_w, save_h;
+
+        if (rga_rot != 0) {
+            st = imrotate_t(half, dst, rga_rot, 1);
+            if (st != IM_STATUS_SUCCESS) {
+                fprintf(stderr, "[rga] cam%d imrotate(%d) failed: %d\n",
+                        cam, rotation, (int)st);
+                continue;
+            }
+            save_data = out_buf;
+            save_w = out_w;
+            save_h = out_h;
+        } else {
+            save_data = half_buf;
+            save_w = cam_w;
+            save_h = cam_h;
+        }
+
+        /* Шаг 3: сохранить в файл */
+        snprintf(fname, sizeof(fname), "%s%d_%dx%d_pts%lld_nv12.raw",
+                 out_prefix, cam, save_w, save_h, pts_us);
+        FILE *fp = fopen(fname, "wb");
+        if (!fp) {
+            fprintf(stderr, "[rga] cam%d cannot open %s\n", cam, fname);
+            continue;
+        }
+        size_t written = fwrite(save_data, 1, save_w * save_h * 3 / 2, fp);
+        fclose(fp);
+        printf("  [rga] cam%d: %dx%d → %s (%zu bytes, rot=%d)\n",
+               cam, save_w, save_h, fname, written, rotation);
+    }
+
+    free(half_buf);
+    free(out_buf);
+    return 0;
 }
 
 /* Вычислить размер мега-кадра */
@@ -232,9 +378,9 @@ int main(int argc, char **argv) {
                            ctx.mode == AVS_MODE_NOBLEND_VER ? "NOBLEND_VER" :
                            "BLEND";
 
-    printf("vi_grab_avs: %dx%d per sensor, mode=%s, sync=%d, mega=%dx%d, skip=%d, save=%d\n",
+    printf("vi_grab_avs: %dx%d per sensor, mode=%s, sync=%d, mega=%dx%d, skip=%d, save=%d, split=%d, rot=%d\n",
            ctx.width, ctx.height, mode_str, ctx.bSyncPipe, mega_w, mega_h,
-           ctx.skipFrames, ctx.frameCount);
+           ctx.skipFrames, ctx.frameCount, ctx.split, ctx.rotateCam);
 
     /* 1. Инициализация MPI */
     ret = RK_MPI_SYS_Init();
@@ -513,20 +659,33 @@ int main(int argc, char **argv) {
 
         /* Фаза save — сохраняем в файл */
         void *data = RK_MPI_MB_Handle2VirAddr(stMegaFrame.stVFrame.pMbBlk);
-        char fname[300];
-        snprintf(fname, sizeof(fname), "%s_%dx%d_pts%lld_nv12.raw",
-                 ctx.outputPrefix, w, h, pts_us);
-        FILE *fp = fopen(fname, "wb");
-        if (!fp) {
-            fprintf(stderr, "Cannot open %s\n", fname);
-        } else {
-            int expected = w * h * 3 / 2;
-            int to_write = (data_len > 0) ? data_len : expected;
-            size_t written = fwrite(data, 1, to_write, fp);
-            fclose(fp);
-            printf("Frame %d [save]: %dx%d pts=%lldus grab=%lldms len=%d → %s (%zu bytes)\n",
-                   frame, w, h, pts_us, t_grab, data_len, fname, written);
+
+        if (ctx.split) {
+            /* Режим split: нарезать мега-кадр на cam0/cam1 через RGA */
+            printf("Frame %d [save]: %dx%d pts=%lldus grab=%lldms → split (rot=%d)\n",
+                   frame, w, h, pts_us, t_grab, ctx.rotateCam);
+            rga_split_and_rotate(data, w, h,
+                                 ctx.width, ctx.height, ctx.mode,
+                                 ctx.rotateCam, ctx.outputPrefix,
+                                 pts_us, ctx.verbose);
             saved++;
+        } else {
+            /* Обычный режим: сохранить мега-кадр целиком */
+            char fname[300];
+            snprintf(fname, sizeof(fname), "%s_%dx%d_pts%lld_nv12.raw",
+                     ctx.outputPrefix, w, h, pts_us);
+            FILE *fp = fopen(fname, "wb");
+            if (!fp) {
+                fprintf(stderr, "Cannot open %s\n", fname);
+            } else {
+                int expected = w * h * 3 / 2;
+                int to_write = (data_len > 0) ? data_len : expected;
+                size_t written = fwrite(data, 1, to_write, fp);
+                fclose(fp);
+                printf("Frame %d [save]: %dx%d pts=%lldus grab=%lldms len=%d → %s (%zu bytes)\n",
+                       frame, w, h, pts_us, t_grab, data_len, fname, written);
+                saved++;
+            }
         }
 
         RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
