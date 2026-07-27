@@ -309,6 +309,129 @@ improcess(src, dst, pat, srect, drect, prect, IM_HAL_TRANSFORM_ROT_90 | IM_SYNC)
 - **RGA** — нарезка мега-кадра на половинки + поворот (`vi_grab_avs --split`, `vi_grab_avs_dma`)
 - **VPSS** — **не используется** в наших программах. Был бы нужен если бы мы делали IPC-пайплайн (main+sub stream + NPU + display из одного кадра). rkipc использует VPSS именно так.
 
+### RGA: рисование поверх кадра (OSD, bounding boxes, прямоугольники)
+
+**ДА, RGA умеет рисовать прямоугольники** поверх растра — аппаратно, без CPU. Это нужно для выделения объектов после NPU-детекции (bounding boxes), OSD (on-screen display), масок приватности.
+
+#### API рисования (`im2d_single.h`)
+
+| Функция | Что делает | Аппаратно? |
+|---------|------------|------------|
+| `imfill(dst, rect, color)` | Залить прямоугольник цветом | Да (`IM_COLOR_FILL`) |
+| `imfillArray(dst, rects[], n, color)` | Залить N прямоугольников одним цветом | Да (цикл `imfill`) |
+| **`imrectangle(dst, rect, color, thickness)`** | **Нарисовать контур прямоугольника** (толщина линий) | Да (4× `imfill`) |
+| **`imrectangleArray(dst, rects[], n, color, thickness)`** | **N прямоугольников-контуров** | Да (цикл `imrectangle`) |
+| `immosaic(image, rect, mode)` | Замозаичить регион (`IM_MOSAIC_8/16/32/64/128`) | Да (только RGA2 Pro) |
+| `immosaicArray(image, rects[], n, mode)` | N мозаичных регионов | Да |
+| `imblend(fg, bg, mode)` | Alpha-blend поверх фона (`IM_ALPHA_BLEND_SRC_OVER`) | Да |
+| `imcomposite(srcA, srcB, dst, mode)` | 3-channel blend (srcA + srcB → dst) | Да |
+| `imcolorkey(src, dst, range, mode)` | Color-key transparency (зелёный экран) | Да |
+| `imrop(src, dst, code)` | Raster OPeration (AND/OR/XOR) | Да |
+| `imquantize(src, dst, nn_info)` | NPU-квантизация (для RKNN препроцессинга) | Да |
+| `imgaussianBlur(src, dst, w, h, σ)` | Гауссово размытие | Да |
+| `impalette(src, dst, lut)` | LUT-palette (палитра) | Да |
+| `immakeBorder(src, dst, ...)` | Добавить рамку (как `cv::copyMakeBorder`) | Да |
+
+#### Пример: bounding boxes после NPU-детекции
+
+```c
+/* Допустим, NPU вернул координаты объектов:
+ *   {x=100, y=50, w=200, h=150}  — человек
+ *   {x=400, y=80, w=120, h=90}   — машина
+ * Рисуем красные контуры поверх кадра (NV12, 1920×1080) */
+
+rga_buffer_t frame = wrapbuffer_fd_t(dmabuf_fd, 1920, 1080,
+                                     1920, 1080, RK_FORMAT_YCbCr_420_SP);
+
+im_rect boxes[2] = {
+    { .x = 100, .y = 50,  .width = 200, .height = 150 },  /* person */
+    { .x = 400, .y = 80,  .width = 120, .height = 90  },  /* car   */
+};
+
+/* Цвет в формате dst (NV12 = YUV). Красный в YUV: Y=76, U=84, V=255.
+ * imfill/imrectangle принимают color как uint32 — для NV12 это
+ * (V << 16) | (U << 8) | Y, но проще использовать RGBA-буфер для OSD. */
+uint32_t red_yuv = (255 << 16) | (84 << 8) | 76;
+
+IM_STATUS st = imrectangleArray(frame, boxes, 2, red_yuv, /*thickness=*/3, IM_SYNC);
+if (st != IM_STATUS_SUCCESS)
+    fprintf(stderr, "imrectangleArray failed: %d\n", (int)st);
+```
+
+#### Как `imrectangle` работает внутри
+
+`imrectangle` — это **4 вызова `imfill`** (верх, низ, лево, право):
+
+```c
+IM_STATUS imrectangle(rga_buffer_t dst, im_rect rect,
+                      uint32_t color, int thickness, int sync) {
+    if (thickness < 0)
+        return imfill(dst, rect, color, sync);  /* filled */
+
+    int h_length = rect.width;
+    int v_length = rect.height - 2 * thickness;
+    im_rect fill_rect[4] = {
+        {rect.x,                          rect.y,                          h_length, thickness},  /* top    */
+        {rect.x,                          rect.y + rect.height - thickness, h_length, thickness},  /* bottom */
+        {rect.x,                          rect.y + thickness,              thickness, v_length},   /* left   */
+        {rect.x + rect.width - thickness, rect.y + thickness,              thickness, v_length},   /* right  */
+    };
+    return imfillArray(dst, fill_rect, 4, color, sync);
+}
+```
+
+То есть контур толщиной 3px = 4 аппаратных `IM_COLOR_FILL` операции. Каждый `imfill` — это один вызов RGA через `/dev/rga` ioctl.
+
+#### Поддержка на RV1126B
+
+Все версии RGA (RGA_1, RGA_1_PLUS, RGA_2, RGA_2_LITE0/1/2, RGA_2_ENHANCE, RGA_2_PRO) поддерживают `IM_RGA_SUPPORT_FEATURE_COLOR_FILL`. RV1126B имеет RGA (точная версия определяется в runtime через `imqueryRGAMap()`), так что **`imfill`/`imrectangle` работают**.
+
+Дополнительные фичи (зависят от версии RGA):
+- `IM_RGA_SUPPORT_FEATURE_COLOR_PALETTE` — все версии (LUT-палитра)
+- `IM_RGA_SUPPORT_FEATURE_ROP` — RGA_1, RGA_2, RGA_2_LITE0, RGA_2_ENHANCE, RGA_2_PRO
+- `IM_RGA_SUPPORT_FEATURE_MOSAIC` — **только RGA_2_PRO** (мозаика для масок приватности)
+- `IM_RGA_SUPPORT_FEATURE_OSD` — только RGA_2_PRO
+- `IM_RGA_SUPPORT_FEATURE_ALPHA_BIT_MAP` — только RGA_2_PRO
+
+#### Цвет в NV12 (YUV) vs RGBA
+
+RGA `imfill` принимает `uint32_t color`. Формат цвета зависит от pixel format буфера:
+
+| Формат буфера | Цвет | Пример (красный) |
+|---------------|------|-------------------|
+| `RK_FORMAT_RGBA_8888` | `0xRRGGBBAA` | `0xFF0000FF` (R=255, G=0, B=0, A=255) |
+| `RK_FORMAT_BGRA_8888` | `0xBBGGRRAA` | `0x0000FFFF` |
+| `RK_FORMAT_YCbCr_420_SP` (NV12) | `0x00VUY` или `0xVUY` | Y=76, U=84, V=255 → `0xFF544C` |
+
+Для OSD удобнее использовать **RGBA-буфер** и alpha-blend его поверх YUV-кадра через `imblend` — так можно рисовать полупрозрачные прямоугольники.
+
+#### Полный пайплайн: NPU-детекция → RGA-разметка → VO-дисплей
+
+```
+VI/AVS → RGA resize (256×144) → NPU (rknn inference)
+                                    ↓
+                              bounding boxes [{x,y,w,h}, ...]
+                                    ↓
+                              RGA imrectangleArray (толщина=3, цвет=красный)
+                                    ↓
+                              кадр с разметкой (NV12 1920×1080)
+                                    ↓
+                              VO → VOP2 → HDMI/LCD
+```
+
+**Zero-copy**: кадр остаётся в DMA буфере на всём пути — RGA пишет прямо в dmabuf, VO читает из того же dmabuf.
+
+#### Альтернативы для OSD
+
+| Способ | Где | Плюсы | Минусы |
+|--------|-----|-------|--------|
+| **RGA `imrectangle`** | librga | Аппаратно, zero-copy, просто | Только прямоугольники |
+| **RGN (Region)** | rockit MPI (`RK_MPI_RGN_*`) | Интеграция в bind-пайплайн, overlay на VO layer | Сложнее, только для VO |
+| **CPU + RGBA overlay** | приложение | Любые фигуры, текст (FreeType) | Медленно, CPU copy |
+| **GPU (OpenGL ES)** | приложение | Любые фигуры, шейдеры | Сложнее, нужен EGL context |
+
+Для простых bounding boxes после NPU — **RGA `imrectangleArray`** оптимально: один вызов, аппаратно, zero-copy.
+
 ### VO vs VOP2 vs DRM — в чём разница?
 
 | | **VO** | **VOP2** | **DRM/KMS** |
