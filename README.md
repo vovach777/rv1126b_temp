@@ -435,6 +435,160 @@ flowchart LR
 
 Для простых bounding boxes после NPU — **RGA `imrectangleArray`** оптимально: один вызов, аппаратно, zero-copy.
 
+### Зона действия VPSS: что может, что не может
+
+VPSS — это **внутренний узел rockit-пайплайна**. Его "зона действия" жёстко ограничена границами rockit.
+
+#### Что VPSS МОЖЕТ
+
+| Возможность | Куда | Источник в SDK |
+|-------------|------|----------------|
+| **Принимать кадр от AVS** (через bind) | VPSS_GRP (вход) | `RK_MPI_SYS_Bind(AVS→VPSS)` — работает в rkadk (`rkadk_record.c:1168`) |
+| **Принимать кадр от VI** (через bind) | VPSS_GRP (вход) | `RK_MPI_SYS_Bind(VI→VPSS)` — стандартный путь |
+| **Принимать кадр от VDEC** (через bind) | VPSS_GRP (вход) | для декодированного потока |
+| **Принимать кадр вручную** (SendFrame) | VPSS_GRP (вход) | `RK_MPI_VPSS_SendFrame(grp, pipe, &frame, timeout)` — любой rockit MB_BLK |
+| **Fan-out 1→4 канала** | VPSS_CHN0-3 (выходы) | `u32UseChnCnt`, `u32ChnMap[]` в `VPSS_GRP_ATTR_S` |
+| **Scale на каждый канал** | VPSS_CHN0-3 | `stVpssChnAttr[i].u32Width/Height` |
+| **Crop на каждый канал** | VPSS_CHN0-3 | `RK_MPI_VPSS_SetChnCrop(grp, chn, &crop)` |
+| **Поворот 90/180/270 на канал** | VPSS_CHN0-3 | `RK_MPI_VPSS_SetChnRotation(grp, chn, ROTATION_90)` |
+| **Mirror + Flip** | VPSS_CHN0-3 | `bMirror`, `bFlip` в `VPSS_CHN_ATTR_S` |
+| **AFBC/RFBC compression** | VPSS_GRP | `enCompressMode = COMPRESS_RFBC_64x4` |
+| **Aspect ratio с letterbox** | VPSS_CHN | `stAspectRatio` в `VPSS_CHN_ATTR_S` |
+| **Передать на VO** (через bind) | VO | `RK_MPI_SYS_Bind(VPSS→VO)` — работает в rkadk (`rkadk_disp.c:328`) |
+| **Передать на VENC** (через bind) | VENC | `RK_MPI_SYS_Bind(VPSS→VENC)` — стандарт |
+| **Передать на NPU?** | ❌ НЕТ напрямую | NPU не rockit-модуль (`RK_ID_NPU` нет в `MOD_ID_E`) |
+| **Получить кадр вручную** | приложение | `RK_MPI_VPSS_GetChnFrame(grp, chn, &frame, timeout)` → MB_BLK |
+| **Выбор железа под капотом** | RV1126B | `enVProcDev = VIDEO_PROC_DEV_RGA / GPU / VPSS` |
+
+#### Что VPSS НЕ МОЖЕТ
+
+| Ограничение | Почему | Альтернатива |
+|-------------|--------|--------------|
+| **Принимать кадр от RGA** (через bind) | RGA — не rockit-модуль для bind (`RK_ID_RGA` есть в enum, но bind RGA→VPSS не реализован) | RGA → `RK_MPI_VPSS_SendFrame()` вручную (нужно обернуть dmabuf в MB_BLK через `MB_EXT`) |
+| **Принимать произвольный dmabuf** | VPSS работает только с rockit MB_BLK | Использовать `RK_MPI_SYS_MbAlloc` + `MB_EXT` для обёртки внешнего dmabuf |
+| **Отправить в DRM напрямую** | DRM — kernel subsystem, не rockit-модуль | Только через VO: `VPSS→VO→VOP2→DRM` |
+| **Отправить в NPU напрямую** | NPU — отдельный SDK (RKNN), не rockit-модуль | `RK_MPI_VPSS_GetChnFrame` → `RK_MPI_MB_Handle2Fd` → `rknn_set_io_mem.fd` |
+| **Работать вне rockit** | Нужен `RK_MPI_SYS_Init()` | Для вне-rockit обработки — RGA |
+| **Больше 4 каналов** | `VPSS_MAX_CHN_NUM = 4` (CHN0-3) | Создать второй VPSS_GRP и забиндить тот же источник |
+
+#### Может ли AVS-кадр пойти на VPSS для fan-out? — ДА
+
+Это **стандартный путь** в rkadk для PiP (picture-in-picture):
+
+```mermaid
+flowchart LR
+    VI0["VI cam0"] -->|Bind| AP0["AVS pipe 0"]
+    VI1["VI cam1"] -->|Bind| AP1["AVS pipe 1"]
+    AP0 --> AVS["AVS grp\nstitch → мега-кадр"]
+    AP1 --> AVS
+    AVS -->|Bind| VPSS["VPSS_GRP\n(enVProcDev=RGA\nна RV1126B)"]
+    VPSS --> CHN0["VPSS_CHN0\n1920×1080"] --> VENC0["VENC0\nmain stream"]
+    VPSS --> CHN1["VPSS_CHN1\n640×360"] --> VENC1["VENC1\nsub stream"]
+    VPSS --> CHN2["VPSS_CHN2\n256×144"] --> NPU_OUT["GetChnFrame\n→ dmabuf fd\n→ rknn"]
+    VPSS --> CHN3["VPSS_CHN3\n1920×1080\nROTATION_90"] --> VO["VO → VOP2\n→ DRM → HDMI"]
+```
+
+Код из rkadk (`rkadk_record.c:1166-1200`):
+```c
+// AVS → VPSS (мега-кадр идёт на VPSS для fan-out)
+ret = RK_MPI_SYS_Bind(&stAvsChn, &stDstVpssChn);   // AVS chn → VPSS grp
+
+// VPSS → VENC (один из каналов VPSS → энкодер)
+ret = RK_MPI_MPI_SYS_Bind(&stSrcVpssChn, &stDestChn); // VPSS chn → VENC
+
+// VI → AVS (две камеры на вход AVS)
+ret = RK_MPI_SYS_Bind(&stSrcChn, &stAvspipe0Chn);     // VI cam0 → AVS pipe 0
+ret = RK_MPI_SYS_Bind(&stAvsSubViChn, &stAvspipe1Chn); // VI cam1 → AVS pipe 1
+```
+
+#### Может ли кадр пойти на VPSS через RGA? — только вручную
+
+**RGA не может быть источником bind** для VPSS (нет bind RGA→VPSS в rockit). Но можно вручную:
+
+```c
+// 1. RGA обрабатывает кадр в DMA буфер
+improcess(src, dst, ...);  // dst — dmabuf_fd
+
+// 2. Обернуть dmabuf в rockit MB_BLK (MB_EXT)
+MB_BLK mb = RK_MPI_SYS_MbAlloc(...);  // или MB_EXT с внешним fd
+// заполнить VIDEO_FRAME_INFO_S из dst
+
+// 3. Отправить в VPSS вручную
+RK_MPI_VPSS_SendFrame(vpssGrp, pipe, &frame, timeout);
+
+// 4. VPSS делает fan-out на свои каналы
+```
+
+Это **не zero-copy в чистом виде** — нужен MB_EXT (внешний буфер в rockit). Но копирования данных нет, только обёртка.
+
+**Проще**: если нужен fan-out после RGA, сделать **два вызова RGA** (crop+rotate для каждого потребителя). RGA быстрее для простых операций, чем VPSS+RGA-под-капотом.
+
+#### Может ли VPSS отправить на дисплей минуя VO? — НЕТ
+
+```mermaid
+flowchart LR
+    VPSS["VPSS_CHN"] -->|Bind| VO["VO\n(rockit MPI)"]
+    VO --> VOP["VOP2\n(аппаратный)"]
+    VOP --> DRM["DRM/KMS\n(kernel)"]
+    DRM --> OUT["HDMI / MIPI / LVDS"]
+    VPSS -.->|❌ напрямую нельзя| DRM
+    VPSS -.->|❌ напрямую нельзя| OUT
+```
+
+**VPSS не может биндиться на DRM** — DRM не rockit-модуль (`RK_ID_DRM` нет в `MOD_ID_E`). Единственный путь к физическому дисплею через rockit — **VO**:
+
+```c
+// VPSS → VO (стандартный путь к дисплею)
+MPP_CHN_S src = { .enModId = RK_ID_VPSS, .s32DevId = vpssGrp, .s32ChnId = vpssChn };
+MPP_CHN_S dst = { .enModId = RK_ID_VO,   .s32DevId = voLayer, .s32ChnId = voChn   };
+RK_MPI_SYS_Bind(&src, &dst);
+```
+
+VO под капотом делает `ioctl()` в DRM-драйвер VOP2. То есть **VPSS→VO→VOP2→DRM** — это не "через VO", а "VO и есть интерфейс к DRM в rockit".
+
+#### Если нужен прямой DRM (минуя VO)
+
+Если вы хотите управлять DRM-плоскостями напрямую (например, для композиции с другими приложениями через DRM master), то **VPSS тут не поможет**. Нужно:
+
+```c
+// 1. Получить кадр из VPSS (или AVS, или VI)
+RK_MPI_VPSS_GetChnFrame(grp, chn, &frame, timeout);  // → MB_BLK
+int dmabuf_fd = RK_MPI_MB_Handle2Fd(frame.stVFrame.u64MbBlk);
+
+// 2. Открыть DRM напрямую (минуя VO)
+int drm_fd = open("/dev/dri/card0", O_RDWR);
+// drmModeAddFB2(drm_fd, dmabuf_fd, ...) → DRM framebuffer
+// drmModeSetPlane(...) → показать на экране
+```
+
+Но это **дублирует логику VO** — VO уже делает то же самое через VOP2. Проще использовать VO.
+
+#### Сводка: зона действия VPSS
+
+```mermaid
+flowchart TD
+    subgraph Вход["Вход (только rockit MB_BLK)"]
+        VI["VI"] --> VPSS
+        AVS["AVS"] --> VPSS
+        VDEC["VDEC"] --> VPSS
+        SEND["SendFrame\n(вручную)"] --> VPSS
+    end
+
+    VPSS["VPSS_GRP\nscale/crop/rotate\ncompress/aspect ratio\n1→4 канала"]
+
+    subgraph Выход["Выход (только rockit MB_BLK)"]
+        VPSS --> VO["VO → VOP2 → DRM"]
+        VPSS --> VENC["VENC → H.264"]
+        VPSS --> GET["GetChnFrame\n→ приложение"]
+    end
+
+    RGA_EXT["RGA\n(вне rockit)"] -.->|только через\nSendFrame+MB_EXT| VPSS
+    NPU_EXT["NPU/RKNN\n(вне rockit)"] -.->|только через\nGetChnFrame+Handle2Fd| VPSS
+    DRM_EXT["DRM напрямую\n(минуя VO)"] -.->|❌ нельзя| VPSS
+```
+
+**VPSS — это "остров" в rockit**: входит через rockit-bind (или SendFrame), выходит через rockit-bind (или GetChnFrame). Всё, что вне rockit (RGA, NPU, DRM), требует ручной перекладки через dmabuf fd.
+
 ### VO vs VOP2 vs DRM — в чём разница?
 
 | | **VO** | **VOP2** | **DRM/KMS** |
