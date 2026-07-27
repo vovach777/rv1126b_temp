@@ -2184,6 +2184,318 @@ ssh root@10.0.55.160 "chmod +x /tmp/vi_grab_avs && /tmp/vi_grab_avs -w 1920 -h 1
 
 ---
 
+## Стерео-настройки RV1126B: что есть в SDK для двух камер
+
+Помимо сшивания (AVS), SDK содержит **4 слоя стерео-функциональности** для синхронизации и калибровки двух камер. Это важно для нашей стерео-камеры (2× GC2093).
+
+### Слой 1: Group ISP — синхронизация 3A между камерами
+
+**Самое важное для стерео.** В `rk_aiq_user_api2_camgroup.h`:
+
+```c
+typedef struct rk_aiq_camgroup_instance_cfg_s {
+    const char* sns_ent_nm_array[RK_AIQ_CAM_GROUP_MAX_CAMS]; // до 8 камер
+    int sns_num;
+    const char* config_file_dir;
+    const char* single_iq_file;    // IQ-файл для одиночной камеры
+    const char* group_iq_file;     // ← ГРУППОВОЙ IQ-файл (для стерео!)
+    const char* overlap_map_file;  // ← КАРТА ПЕРЕКРЫТИЯ (для сшивания!)
+    rk_aiq_hwevt_cb pHwEvt_cb;
+} rk_aiq_camgroup_instance_cfg_t;
+```
+
+API (`rk_aiq_user_api2_camgroup.h`):
+- `rk_aiq_uapi2_camgroup_create(cfg)` — создать группу
+- `rk_aiq_uapi2_camgroup_prepare(ctx, WDRMode)` — подготовить
+- `rk_aiq_uapi2_camgroup_start(ctx)` — запустить
+- `rk_aiq_uapi2_camgroup_getOverlapMap(ctx)` — получить карту перекрытия
+- `rk_aiq_uapi2_camgroup_getCamInfos(ctx, &infos)` — инфо о камерах
+- `rk_aiq_uapi2_camgroup_resetCam(ctx, camId)` — сбросить камеру
+
+**Что group mode даёт для стерео:**
+- **Синхронизация AE** — обе камеры получают одинаковую экспозицию (критично для стерео-matching)
+- **Синхронизация AWB** — одинаковый баланс белого (цвета совпадают)
+- **Синхронизация AF** — одинаковый фокус
+- **Group IQ-файл** — отдельный IQ-файл для групповой калибровки
+
+В rkipc (`rv1126b_dual_ipc/main.c:172`):
+```c
+if (rk_param_get_int("isp:group_mode", 1)) {
+    rk_isp_group_init(0, rkipc_iq_file_path_);  // ← group mode
+} else {
+    rk_isp_init(0, ...);  // ← individual mode
+    rk_isp_init(1, ...);
+}
+```
+
+Реализация (`app/rkipc/common/isp/rv1126b/isp.c:159`):
+```c
+int isp_camera_group_init(int cam_group_id, rk_aiq_working_mode_t WDRMode,
+                          bool MultiCam, const char *iq_file_dir) {
+    rk_aiq_camgroup_instance_cfg_t camgroup_cfg;
+    camgroup_cfg.sns_num = rk_param_get_int("avs:sensor_num", 6);
+    for (int i = 0; i < camgroup_cfg.sns_num; i++) {
+        rk_aiq_uapi2_sysctl_enumStaticMetasByPhyId(i, &aiq_static_info);
+        camgroup_cfg.sns_ent_nm_array[i] = sensor_name_array[i];
+        rk_aiq_uapi2_sysctl_preInit_scene(..., "normal", "day");
+    }
+    camgroup_cfg.config_file_dir = iq_file_dir;
+    g_camera_group_ctx[cam_group_id] = rk_aiq_uapi2_camgroup_create(&camgroup_cfg);
+    rk_aiq_uapi2_camgroup_prepare(g_camera_group_ctx[cam_group_id], WDRMode);
+    rk_aiq_uapi2_camgroup_start(g_camera_group_ctx[cam_group_id]);
+}
+```
+
+В ini-файле:
+```ini
+[isp]
+group_mode = 0    ; ← сейчас ВЫКЛЮЧЕНО в rkipc-dual-800w.ini
+group_ldch = 0    ; ← сейчас ВЫКЛЮЧЕНО
+```
+
+**Включение `group_mode = 1` синхронизирует 3A между камерами** — это первое, что нужно сделать для стерео.
+
+### Слой 2: Group LDCH — коррекция дисторсии обеих камер одновременно
+
+LDCH = **Lens Distortion Correction Header**. В `AVS_FINAL_LUT_S` (`rk_comm_avs.h:137`):
+```c
+typedef struct rkAVS_FINAL_LUT_S {
+    MB_BLK pMeshBlk[AVS_PIPE_NUM];   // mesh (сетка деформации)
+    MB_BLK pAlphaBlk[AVS_PIPE_NUM];  // alpha (для blend)
+    MB_BLK pLdchBlk[AVS_PIPE_NUM];   // ← LDCH для каждой камеры
+    MB_BLK pParamBlk[AVS_PIPE_NUM];  // параметры
+} AVS_FINAL_LUT_S;
+```
+
+В rkipc (`rv1126b_dual_ipc/video.c:381-419`):
+```c
+// AVS вычисляет LDCH-таблицы для обеих камер из калибровки
+for (RK_S32 i = 0; i < g_sensor_num; i++) {
+    ret = RK_MPI_CAL_AVS_GetFinalLutBufferSize(&stBufAttr, &pic_cal[i]);
+    ldch_data[i] = (RK_U16 *)(malloc(pic_cal[i].u32MBSize));
+    ret = RK_MPI_SYS_CreateMB(&(pstFinalLut.pLdchBlk[i]), &stMbExtConfig);
+}
+ret = RK_MPI_AVS_GetFinalLut(s32GrpId, &pstFinalLut);
+
+// Применяем LDCH к обеим камерам через group ISP
+if (rk_param_get_int("isp:group_ldch", 1)) {
+    ret = rk_isp_set_group_ldch_level_form_buffer(
+        0, ldch_data[0], ldch_data[1],
+        pic_cal[0].u32MBSize, pic_cal[1].u32MBSize);
+}
+```
+
+**Что это даёт:**
+- AVS вычисляет LDCH-таблицы для обеих камер из калибровки
+- Применяет их в ISP **до** сшивания — убирает "рыбий глаз"
+- Для стерео: убирает дисторсию, что **критично** для точности disparity matching (после коррекции эпиполярные линии становятся прямыми)
+
+### Слой 3: AVS-калибровка — файлы XML + mesh + alpha
+
+В `AVS_CALIB_S` (`rk_comm_avs.h:132`):
+```c
+typedef struct rkAVS_CALIB_S {
+    const RK_CHAR *pCalibFilePath;   // ← файл калибровки (.xml)
+    const RK_CHAR *pMeshAlphaPath;   // ← путь к mesh+alpha (.bin)
+} AVS_CALIB_S;
+```
+
+В rkipc (`rv1126b_dual_ipc/video.c:346`):
+```c
+stAvsGrpAttr.stInAttr.enParamSource = AVS_PARAM_SOURCE_CALIB;
+stAvsGrpAttr.stInAttr.stCalib.pCalibFilePath =
+    "/oem/usr/share/avs_calib/calib_file.xml";
+```
+
+В ini:
+```ini
+[avs]
+param_source = 1                          ; 0=LUT, 1=CALIB
+calib_file_path = /oem/usr/share/avs_calib/calib_file.xml
+middle_lut_path = /oem/usr/share/middle_lut/5m/
+stitch_distance = 5                       ; ← оптимальное расстояние сшивания (метры)
+```
+
+**Что содержит калибровка** (из `rk_algo_avs_tool_def.h`):
+- **Intrinsic параметры** каждой камеры (фокус, центр, дисторсия)
+- **Extrinsic параметры** (позиция/ориентация каждой камеры относительно первой)
+- **Mesh** — сетка деформации (pre-computed warp)
+- **Alpha** — карта прозрачности для blend
+- **Overlap mask** — карта перекрытия между камерами
+
+**Fine tuning** (`rk_algo_avs_tool_comm.h:297`):
+```c
+typedef struct rkAlgoAVS_FT_PARAMS_SINGLE_S {
+    RKALGO_AVS_BOOL fine_tuning_en;
+    int32_t offset_w;           // смещение по ширине
+    int32_t offset_h;           // смещение по высоте
+    RKALGO_AVS_ROTATION_S rotation;  // yaw/pitch/roll (в 0.01 градуса)
+} RKALGO_AVS_FT_PARAMS_SINGLE_S;
+```
+
+**Auto fine tuning** (`RKALGO_AVS_AUTO_FT_PARAMS_S`) — автоматически подстраивает rotation по тестовым изображениям. Поля:
+- `maxOffset` — максимальное смещение в пикселях
+- `scaleRatio` — downscale для ускорения (0.2–1.0)
+- `pSrcImageBuf[]` — входные изображения
+- `pAftSavePath` — путь сохранения промежуточных результатов
+
+### Слой 4: AVS-режимы и проекции
+
+**Режимы сшивания** (`rk_comm_avs.h:61`):
+```c
+typedef enum rkAVS_MODE_E {
+    AVS_MODE_BLEND        = 0,  // сшивание с blend (плавный переход)
+    AVS_MODE_NOBLEND_VER  = 1,  // вертикально, без blend
+    AVS_MODE_NOBLEND_HOR  = 2,  // горизонтально, без blend (наш случай)
+    AVS_MODE_NOBLEND_QR   = 3,  // 4 камеры квадратно
+    AVS_MODE_NOBLEND_OVL  = 4,  // overlay (PiP)
+    AVS_MODE_BLEND_DYN    = 5,  // динамический blend
+    AVS_MODE_BLEND_JSON   = 6,  // blend с JSON-конфигом
+} AVS_MODE_E;
+```
+
+**Проекции** (`rk_comm_avs.h:44`):
+```c
+AVS_PROJECTION_EQUIRECTANGULAR  = 0,  // эквидистантная (панорама 360°)
+AVS_PROJECTION_RECTILINEAR      = 1,  // прямолинейная (для стерео!)
+AVS_PROJECTION_CYLINDRICAL      = 2,  // цилиндрическая
+AVS_PROJECTION_CUBE_MAP         = 3,  // кубическая (360°)
+AVS_PROJECTION_EQUIRECTANGULAR_TRANS = 4,  // транспонированная эквидистантная
+```
+
+**Gain** (выравнивание яркости, `rk_comm_avs.h:54`):
+```c
+AVS_GAIN_MODE_MANUAL = 0,  // ручное
+AVS_GAIN_MODE_AUTO   = 1,  // автоматическое (выравнивает яркость камер)
+```
+
+**LUT accuracy/step** (`rk_comm_avs.h:21-34`):
+```c
+AVS_LUT_ACCURACY_HIGH    = 0,  // высокая точность
+AVS_LUT_ACCURACY_LOW     = 1,  // низкая точность
+AVS_LUT_STEP_HIGH        = 0,  // шаг 16 пикселей
+AVS_LUT_STEP_MEDIUM      = 1,  // шаг 32 пикселя
+AVS_LUT_STEP_LOW         = 2,  // шаг 64 пикселя
+```
+
+**Fuse width** (ширина зоны плавного перехода):
+```c
+AVS_FUSE_WIDTH_128 = 128,
+AVS_FUSE_WIDTH_256 = 256,
+AVS_FUSE_WIDTH_512 = 512,
+```
+
+### IQ-файлы для GC2093 — есть DUAL-версия!
+
+```
+external/camera_engine_rkaiq/rkaiq/iqfiles/isp20/
+├── gc2093_BFC105-DUAL-L_IR.xml      ← DUAL для стерео! (с IR)
+├── gc2093_BFC105-DUAL-L_IRC.xml     ← DUAL с IRC (IR-cut filter)
+└── gc2093_YT-RV1109-2-V1_40IR-2MP-F20.xml  ← одиночная
+```
+
+**`BFC105-DUAL-L`** — это модель двойного модуля камеры (BFC105 — OEM-модуль, DUAL — две камеры, L — с IR-подсветкой). Это **готовый IQ-файл для стерео-конфигурации**.
+
+### Существующие калибровки в SDK
+
+```
+external/avs/avs_calib/
+├── 1_6x_neg_calib_file.pto     ← 6 камер (Hugin PTO формат)
+├── 1_6x_pos_calib_file.pto
+├── rk_3_camera_result.xml      ← 3 камеры
+└── rk_6_camera_result.xml      ← 6 камер
+
+external/avs/avs_mesh/
+├── 2x/multiBand_5088x1520/     ← 2 камеры! mesh + alpha (наша конфигурация!)
+├── 4x/multiBand_5440x2700/
+├── 6x/...
+└── 8x/...
+
+external/avs/middle_lut/
+├── lut_6x/                     ← 6 камер LUT
+└── lut_8x/                     ← 8 камер LUT
+```
+
+**`2x/multiBand_5088x1520/`** — готовая калибровка для **2-камерной** конфигурации (наша!), размер 5088×1520 (две камеры 2544×1520 side-by-side). Содержит:
+- `rk_ps_gpu_meshx00.bin`, `meshx01.bin` — mesh для камеры 0 и 1 (X координаты)
+- `rk_ps_gpu_meshy00.bin`, `meshy01.bin` — mesh (Y координаты)
+- `rk_ps_gpu_alpha01.bin` — alpha-карта для blend
+- `rk_ps_gpu_mesh_params.txt` — параметры mesh
+
+### Полная схема стерео-функциональности
+
+```mermaid
+flowchart TD
+    subgraph Калибровки["Калибровки (на плате /oem/usr/share/)"]
+        IQ["GC2093 DUAL IQ\n(BFC105-DUAL-L_IR.xml)"]
+        CALIB["AVS calib XML\n(calib_file.xml)"]
+        MESH["Mesh + Alpha .bin\n(avs_mesh/2x/)"]
+        LUT["Middle LUT\n(middle_lut/)"]
+    end
+
+    subgraph GroupISP["Group ISP (rkaiq)"]
+        AE["Синхронизация AE\n(одинаковая экспозиция)"]
+        AWB["Синхронизация AWB\n(одинаковый WB)"]
+        LDCH["Group LDCH\n(коррекция дисторсии\nобеих камер)"]
+    end
+
+    subgraph AVS["AVS (rockit)"]
+        SYNC["bSyncPipe=1\n(аппаратная синхр.\nкадров)"]
+        WARP["Mesh warp\n(геометрия сшивания)"]
+        BLEND["Alpha blend\n(плавный переход)"]
+        GAIN["Gain auto\n(выравнивание яркости)"]
+    end
+
+    Калибровки --> GroupISP
+    Калибровки --> AVS
+    GroupISP --> OUT["Синхронизированный\nстерео-кадр"]
+    AVS --> OUT
+```
+
+### Рекомендации для стерео
+
+| Настройка | Сейчас | Рекомендация | Почему |
+|-----------|--------|--------------|--------|
+| `isp:group_mode` | `0` (выкл) | **`1`** | Синхронизация AE/AWB между камерами |
+| `isp:group_ldch` | `0` (выкл) | **`1`** | Коррекция дисторсии (прямые эпиполярные линии) |
+| `avs:sync` | `0` | **`1`** | Аппаратная синхронизация кадров (`bSyncPipe=1`) |
+| `avs:avs_mode` | `0` (BLEND) | `2` (NOBLEND_HOR) или `0` | NOBLEND — точнее для disparity; BLEND — красивее для просмотра |
+| `avs:projection_mode` | `0` (EQUIRECT) | **`1`** (RECTILINEAR) | Rectilinear сохраняет прямые линии — лучше для стерео |
+| `avs:stitch_distance` | `5` | по калибровке | Оптимальное расстояние сшивания |
+| `avs:gain` (stGainAttr) | AUTO | **AUTO** | Выравнивает яркость камер |
+| IQ-файл | ? | **`gc2093_BFC105-DUAL-L_IR.xml`** | DUAL-версия для стерео |
+
+### Чего в SDK НЕТ для стерео
+
+- **Нет disparity matching** — нет вычисления глубины/карты диспаратности. AVS только сшивает, не вычисляет глубину.
+- **Нет stereo calibration API** — калибровка должна быть сделана внешним инструментом (Hugin, OpenCV) и загружена из XML
+- **Нет depth map** — нет генерации карты глубины
+- **Нет epipolar rectification** — только LDCH (дисторсия), но не эпиполярная ректификация (когда обе камеры приводятся к общей плоскости)
+
+**Для полноценного стерео** (depth map) нужно:
+1. Включить `group_mode=1`, `group_ldch=1`, `sync=1` (синхронизация + коррекция)
+2. Использовать DUAL IQ-файл (`gc2093_BFC105-DUAL-L_IR.xml`)
+3. Калибровать камеры внешним инструментом (OpenCV `stereoCalibrate`)
+4. Вычислять disparity на NPU (своя RKNN-модель) или на CPU (OpenCV SGBM)
+
+### Где что искать в SDK
+
+| Компонент | Путь | Что |
+|-----------|------|-----|
+| Group ISP API | `external/camera_engine_rkaiq/rkaiq/include/uAPI2/rk_aiq_user_api2_camgroup.h` | camgroup create/prepare/start |
+| Group ISP реализация | `app/rkipc/common/isp/rv1126b/isp.c:159` | `isp_camera_group_init()` |
+| AVS-калибровка (rockit) | `external/rockit/mpi/sdk/include/rk_comm_avs.h:132` | `AVS_CALIB_S`, `AVS_FINAL_LUT_S` |
+| AVS-калибровка (tool) | `external/avs/lib/rk_algo_avs_tool_def.h` | `RKALGO_AVS_CALIB_PARAMS_S`, fine tuning |
+| AVS-калибровка (comm) | `external/avs/lib/rk_algo_avs_tool_comm.h` | `ROTATION_S`, `CAMERA_STATUS_S` |
+| IQ-файлы GC2093 | `external/camera_engine_rkaiq/rkaiq/iqfiles/isp20/gc2093_BFC105-DUAL-L_*.xml` | DUAL IQ |
+| Mesh 2-камерная | `external/avs/avs_mesh/2x/multiBand_5088x1520/` | mesh+alpha .bin |
+| Калибровки XML | `external/avs/avs_calib/` | .pto, .xml |
+| Middle LUT | `external/avs/middle_lut/` | .bin |
+| rkipc dual IPC | `app/rkipc/src/rv1126b_dual_ipc/` | ini + video.c |
+| rkipc ini | `app/rkipc/src/rv1126b_dual_ipc/rkipc-dual-800w.ini` | `[avs]`, `[isp]` секции |
+
+---
+
 ## CLI: vi_grab_avs_dma — AVS → RGA → DMA буфер (zero-copy пайплайн)
 
 `vi_grab_avs_dma` — расширение `vi_grab_avs` для **полного zero-copy пайплайна**. Вместо `malloc` для выходного буфера RGA, выделяет DMA буфер через `/dev/dma_heap/system-uncached`. Этот буфер можно:
