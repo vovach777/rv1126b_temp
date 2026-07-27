@@ -54,17 +54,18 @@ for d in "$ROCKIT_INC" "$ROCKIT_DEF" "$ROCKIT_LIB" "$RGA_INC1" "$RGA_INC2"; do
     fi
 done
 
-# librga.so — ищем в нескольких местах:
-#   1. lib/ рядом со скриптом (положите туда с платы)
-#   2. $SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/ (есть в SDK, но только arm32!)
-#   3. Собираем из исходников $SDK_PATH/external/linux-rga/ (если есть cmake + cross-compiler)
-# Для arm64 (RV1126B) librga.so НЕТ в SDK — только arm32 в rkisp_demo.
-# Берём с платы: scp root@<board>:/usr/lib/librga.so lib/
+# librga.so (arm64) — ищем в нескольких местах:
+#   1. lib/ рядом со скриптом (можно положить с платы или из SDK)
+#   2. $SDK_PATH/external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/ ← ЕСТЬ в SDK!
+#   3. $SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/ (только arm32 в SDK)
+#   4. Собираем из исходников $SDK_PATH/external/linux-rga/ (если есть cmake + cross-compiler)
+# Для arm64 (RV1126B) librga.so ЕСТЬ в SDK — в rknpu2 (статическая librga.a тоже есть).
 LIB_RGA_PATH="${LIB_RGA_PATH:-$(dirname "$0")/lib}"
 
-# Автопоиск librga.so в SDK (на случай если появится arm64)
+# Автопоиск librga.so в SDK (arm64)
 if [ ! -f "$LIB_RGA_PATH/librga.so" ]; then
     for cand in \
+        "$SDK_PATH/external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/librga.so" \
         "$SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/librga.so" \
         "$SDK_PATH/external/linux-rga/build/librga.so"; do
         if [ -f "$cand" ]; then
@@ -129,6 +130,5 @@ echo ""
 echo "Done. Binaries in build/"
 echo "Copy to board: scp build/* root@<board>:/tmp/"
 echo ""
-echo "NOTE: librga.so (arm64) is NOT in SDK — only arm32 in rkisp_demo."
-echo "  Get from board: scp root@<board>:/usr/lib/librga.so $LIB_RGA_PATH/"
-echo "  Or build from source: BUILD_RGA_FROM_SOURCE=1 $0"
+echo "NOTE: librga.so (arm64) is in SDK at external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/"
+echo "  Also available: librga.a (static), and from board: scp root@<board>:/usr/lib/librga.so $LIB_RGA_PATH/"

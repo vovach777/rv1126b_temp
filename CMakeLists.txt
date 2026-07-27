@@ -56,19 +56,26 @@ foreach(d ROCKIT_INC ROCKIT_DEF ROCKIT_LIB RGA_INC_IM2D RGA_INC_RGA)
     endif()
 endforeach()
 
-# --- librga.so — ищем в нескольких местах ---
-# 1. lib/ рядом с CMakeLists.txt (положите туда с платы)
-# 2. $SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/ (в SDK только arm32!)
-# 3. Собираем из $SDK_PATH/external/linux-rga/ (если BUILD_RGA_FROM_SOURCE=ON)
-# Для arm64 (RV1126B) librga.so НЕТ в SDK — только arm32 в rkisp_demo.
+# --- librga.so (arm64) — ищем в нескольких местах ---
+# 1. lib/ рядом с CMakeLists.txt
+# 2. $SDK_PATH/external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/ ← ЕСТЬ в SDK!
+# 3. $SDK_PATH/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64/ (только arm32 в SDK)
+# 4. Собираем из $SDK_PATH/external/linux-rga/ (если BUILD_RGA_FROM_SOURCE=ON)
 if(NOT DEFINED LIB_RGA_PATH)
     get_filename_component(LIB_RGA_PATH "${CMAKE_SOURCE_DIR}/lib" ABSOLUTE)
     if(NOT EXISTS "${LIB_RGA_PATH}/librga.so")
-        # Попробуем в SDK
-        set(_RGA_CAND "${SDK_PATH}/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64")
+        # Попробуем в SDK — rknpu2 (там есть arm64!)
+        set(_RGA_CAND "${SDK_PATH}/external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64")
         if(EXISTS "${_RGA_CAND}/librga.so")
             set(LIB_RGA_PATH "${_RGA_CAND}")
-            message(STATUS "Found librga.so in SDK: ${LIB_RGA_PATH}")
+            message(STATUS "Found librga.so in SDK (rknpu2): ${LIB_RGA_PATH}")
+        else()
+            # fallback: rkisp_demo (только arm32 в SDK)
+            set(_RGA_CAND "${SDK_PATH}/external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm64")
+            if(EXISTS "${_RGA_CAND}/librga.so")
+                set(LIB_RGA_PATH "${_RGA_CAND}")
+                message(STATUS "Found librga.so in SDK (rkisp_demo): ${LIB_RGA_PATH}")
+            endif()
         endif()
     endif()
 endif()

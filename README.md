@@ -51,7 +51,7 @@ SDK_PATH=/path/to/sdk ./build.sh vi_grab_avs      # только одну
 # Результат: build/vi_grab_frame, build/vi_grab_avs, build/vi_grab_avs_dma, build/vi_grab_dual
 ```
 
-**librga.so** — единственная библиотека, которой **нет в SDK** (только заголовки `external/linux-rga/`). Возьмите её с платы:
+**librga.so** — нашёлся в SDK в неочевидном месте: `external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/librga.so` (arm64, 196KB). `build.sh` и `CMakeLists.txt` автоматически находят его. Также есть статическая `librga.a`. Альтернатива — с платы:
 
 ```bash
 scp root@<board-ip>:/usr/lib/librga.so lib/
@@ -80,21 +80,29 @@ make
 | `external/rockit/lib/arm64/rv1126b/linux/` | `librockit.so` | линковка |
 | `external/linux-rga/im2d_api/` | `im2d_*.h` (RGA C API) | vi_grab_avs (--split) |
 | `external/linux-rga/include/` | `rga.h`, `drmrga.h` | vi_grab_avs (--split) |
+| `external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/` | **`librga.so`**, `librga.a` (arm64) | линковка RGA |
 | `external/camera_engine_rkaiq/` | `Findlibrga.cmake` (3 копии) | для cmake |
 
 ### librga.so — отдельная история
 
-В SDK **нет arm64 версии `librga.so`** — только arm32 в `external/camera_engine_rkaiq/rkisp_demo/demo/libs/arm32/`.
-Для RV1126B (arm64) есть 3 варианта:
+`librga.so` (arm64) нашёлся в SDK в **неочевидном месте** — внутри `rknpu2` (не в `linux-rga` и не в `rkisp_demo`):
 
-1. **С платы** (быстро): `scp root@<board>:/usr/lib/librga.so lib/`
-2. **Собрать из исходников** `external/linux-rga/` (есть CMakeLists.txt):
-   ```bash
-   BUILD_RGA_FROM_SOURCE=1 SDK_PATH=/path/to/sdk ./build.sh
-   ```
-3. **CMake find_package** — `Findlibrga.cmake` в SDK ищет системную `librga` (если установлена через пакет)
+```
+external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/
+├── librga.so   (196 KB, AARCH64) ← то что нужно
+└── librga.a    (349 KB, статическая)
+```
 
-`build.sh` и `CMakeLists.txt` автоматически ищут `librga.so` в `lib/`, потом в SDK, потом предлагают собрать из исходников.
+В `external/camera_engine_rkaiq/rkisp_demo/demo/libs/` есть только **arm32** версия — не подходит для RV1126B.
+
+`build.sh` и `CMakeLists.txt` ищут `librga.so` по порядку:
+1. `lib/` (рядом со скриптом — можно положить свою версию)
+2. `external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/` ← **нашлось в SDK!**
+3. `external/linux-rga/build/` (если собрали из исходников через `BUILD_RGA_FROM_SOURCE=1`)
+
+Альтернативы:
+- **С платы** (может быть новее): `scp root@<board>:/usr/lib/librga.so lib/`
+- **Собрать из исходников**: `BUILD_RGA_FROM_SOURCE=1 SDK_PATH=/path/to/sdk ./build.sh`
 
 ### Загрузка на плату
 

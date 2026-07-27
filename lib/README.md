@@ -5,27 +5,25 @@
 
 ## Откуда взять
 
-### librga.so (arm64) — НЕТ в SDK
+### librga.so (arm64) — ЕСТЬ в SDK!
 
-В SDK (`external/camera_engine_rkaiq/rkisp_demo/demo/libs/`) есть только **arm32** версия.
-Для RV1126B (arm64) нужно:
+`librga.so` (arm64) нашёлся в SDK в неочевидном месте — внутри `rknpu2`:
 
-**Вариант 1 — с платы (быстро):**
-```bash
-scp root@<board-ip>:/usr/lib/librga.so lib/
+```
+external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/
+├── librga.so   (196 KB, AARCH64)
+└── librga.a    (349 KB, статическая)
 ```
 
-**Вариант 2 — собрать из исходников (если нет платы):**
-```bash
-# build.sh сделает это автоматически если BUILD_RGA_FROM_SOURCE=1
-BUILD_RGA_FROM_SOURCE=1 SDK_PATH=/path/to/sdk ./build.sh
+`build.sh` и `CMakeLists.txt` автоматически находят его там. Можно ничего не класть в `lib/`!
 
-# или вручную:
-cd $SDK_PATH/external/linux-rga
-mkdir build && cd build
-cmake -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc ..
-make -j4
-cp librga.so /path/to/rv1126b_temp/lib/
+**Альтернативы (если нужно):**
+```bash
+# С платы (может быть новее):
+scp root@<board-ip>:/usr/lib/librga.so lib/
+
+# Собрать из исходников:
+BUILD_RGA_FROM_SOURCE=1 SDK_PATH=/path/to/sdk ./build.sh
 ```
 
 ### librockit.so — в SDK
