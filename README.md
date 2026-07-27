@@ -26,32 +26,38 @@ CLI-программы для стереокамеры на базе Rockchip RV
 
 Чтобы не было путаницы между AVS, VPSS, RGA, VO, VOP и DRM — вот полный обзор аппаратных блоков и их связей на RV1126B. Все имена структур/enum соответствуют заголовкам в `external/rockit/mpi/sdk/include/`.
 
-### Аппаратные блоки (слева направо — путь кадра)
+### Аппаратные блоки (путь кадра)
 
+```mermaid
+flowchart LR
+    subgraph Capture["Захват (вход)"]
+        S["Сенсор\nGC2093\nMIPI"] --> CSI["CSI/DPHY"]
+        CSI --> CIF["CIF\nrkcif"]
+        CIF --> ISP["ISP\nrkisp\n3A/AWB/AE"]
+        ISP --> VI["VI\nV4L2\nMB_BLK"]
+    end
+
+    subgraph Process["Обработка"]
+        VI --> AVS["AVS\nstitch\nblend/noblend"]
+        VI -.-> RGA["RGA\n2D blit\ncrop/rotate\n(вне rockit)"]
+        AVS --> VPSS["VPSS\nscale/crop\n1→4 канала"]
+        AVS -.-> RGA
+    end
+
+    subgraph Outputs["Оконечники"]
+        VPSS --> VENC["VENC\nH.264/H.265\nJPEG"]
+        VPSS --> VO["VO\nAPI"]
+        RGA -.-> VO
+        RGA -.-> NPU["NPU/RKNN\n(вне rockit)"]
+        VO --> VOP["VOP2\nкомпозитор"]
+        VOP --> DRM["DRM/KMS\nLinux"]
+        DRM --> OUT["HDMI / MIPI DSI /\nLVDS / eDP / LCD"]
+    end
+
+    VENC -.-> FILE["bitstream\nфайл/сеть"]
 ```
-┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│  Сенсор  │──▶│   CSI    │──▶│   CIF    │──▶│   ISP    │──▶│   VI     │
-│ GC2093   │   │  DPHY   │   │  rkcif   │   │  rkisp   │   │ (V4L2)   │
-│ MIPI     │   │          │   │          │   │          │   │          │
-└──────────┘   └──────────┘   └──────────┘   └──────────┘   └────┬─────┘
-                                                                  │
-                                                                  ▼
-┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│   VENC   │◀──│  VPSS    │◀──│   AVS    │◀─┐│   RGA    │   │   VOP    │
-│ H.264/   │   │ scale/   │   │ stitch   │  ││ 2D blit  │   │  (VOP2)  │
-│ H.265/   │   │ crop/    │   │ blend/   │  ││ crop/    │   │          │
-│ JPEG     │   │ rotate   │   │ noblend  │  ││ rotate   │   │  layers  │
-└────┬─────┘   └────┬─────┘   └──────────┘  │└──────────┘   └────┬─────┘
-     │              │                       │                     │
-     ▼              ▼                       │                     ▼
-  bitstream     кадр в MB                  └── кадр из VI         │
-  (файл/сеть)   (для VO/NPU)                                      │
-                                                                 ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                    Физические интерфейсы вывода                      │
-│  HDMI │ MIPI DSI │ LVDS │ eDP │ DP │ BT.656 │ BT.1120 │ RGB │ LCD  │
-└──────────────────────────────────────────────────────────────────────┘
-```
+
+**Сплошные линии** — rockit bind (zero-copy внутри rockit). **Пунктир** — ручная передача через dmabuf fd (RGA/NPU вне rockit).
 
 ### Что делает каждый блок
 
@@ -81,14 +87,14 @@ RK_MPI_SYS_Bind(&src, &dst);  // VI[0,0] → AVS[0,0]
 
 **Иерархия VO** (от кадра до пикселей на экране):
 
-```
-VIDEO_FRAME_INFO_S (кадр в MB_BLK)
-  → RK_MPI_VO_SendFrame(layer, chn, &frame, timeout)
-    → VO_CHN (канал: rect, rotation, alpha, priority) — позиция кадра на слое
-      → VO_LAYER (Cluster0/1, Smart0/1, Esmart0-3, Virtual0-3)
-        → VO_DEV (устройство: HDMI, MIPI, LVDS, ...)
-          → VOP2 (аппаратная композиция слоёв)
-            → DRM plane → CRTC → encoder → connector → физический выход
+```mermaid
+flowchart TD
+    A["VIDEO_FRAME_INFO_S\n(кадр в MB_BLK)"] --> B["RK_MPI_VO_SendFrame\n(layer, chn, &frame, timeout)"]
+    B --> C["VO_CHN\n(rect, rotation, alpha, priority)\n— позиция кадра на слое"]
+    C --> D["VO_LAYER\n(Cluster0/1, Smart0/1,\nEsmart0-3, Virtual0-3)"]
+    D --> E["VO_DEV\n(HDMI, MIPI, LVDS, ...)"]
+    E --> F["VOP2\n(аппаратная композиция слоёв)"]
+    F --> G["DRM plane → CRTC → encoder\n→ connector → физический выход"]
 ```
 
 **Типы слоёв VO** (`VO_LAYER_MODE_E`):
@@ -186,14 +192,13 @@ VPSS и RGA **пересекаются по функциональности** (
 
 **VPSS — это "разветвитель" пайплайна.** Главная фишка: **1 вход → 4 выхода** с разными разрешениями.
 
-```
-                ┌─ VPSS_CHN0 (1920×1080) → VENC0 (H.264 main stream)
-                │
-VI → VPSS_GRP ──┼─ VPSS_CHN1 (640×360)   → VENC1 (H.264 sub stream)
-                │
-                ├─ VPSS_CHN2 (256×144)   → NPU (детекция объектов)
-                │
-                └─ VPSS_CHN3 (1920×1080) → VO (дисплей)
+```mermaid
+flowchart LR
+    VI["VI"] --> VPSS["VPSS_GRP"]
+    VPSS --> CHN0["VPSS_CHN0\n1920×1080"] --> VENC0["VENC0\nH.264 main stream"]
+    VPSS --> CHN1["VPSS_CHN1\n640×360"] --> VENC1["VENC1\nH.264 sub stream"]
+    VPSS --> CHN2["VPSS_CHN2\n256×144"] --> NPU["NPU\nдетекция объектов"]
+    VPSS --> CHN3["VPSS_CHN3\n1920×1080"] --> VO["VO\nдисплей"]
 ```
 
 **Пример из rkipc** (`rv1126b_ipc/video.c`):
@@ -233,12 +238,12 @@ stVpssChnAttr[3].u32Height = 1080;
 
 **RGA — это "ручной 2D-процессор".** Главная фишка: **работает с любым dmabuf, вне rockit**.
 
-```
-           ┌─ malloc (CPU RAM) ──── fwrite → файл
-           │
-rockit MB ─┼─ DMA буфер (/dev/dma_heap/) ── VO (zero-copy)
-           │
-           └─ NPU dmabuf ── rknn inference
+```mermaid
+flowchart LR
+    MB["rockit MB_BLK\n(dmabuf fd)"] --> RGA["RGA improcess"]
+    RGA --> M["malloc (CPU RAM)\n→ fwrite → файл"]
+    RGA --> DMA["DMA буфер\n/dev/dma_heap/\n→ VO (zero-copy)"]
+    RGA --> NPU["NPU dmabuf\n→ rknn inference"]
 ```
 
 **Пример из `vi_grab_avs_dma.c`:**
@@ -407,16 +412,14 @@ RGA `imfill` принимает `uint32_t color`. Формат цвета зав
 
 #### Полный пайплайн: NPU-детекция → RGA-разметка → VO-дисплей
 
-```
-VI/AVS → RGA resize (256×144) → NPU (rknn inference)
-                                    ↓
-                              bounding boxes [{x,y,w,h}, ...]
-                                    ↓
-                              RGA imrectangleArray (толщина=3, цвет=красный)
-                                    ↓
-                              кадр с разметкой (NV12 1920×1080)
-                                    ↓
-                              VO → VOP2 → HDMI/LCD
+```mermaid
+flowchart LR
+    A["VI/AVS"] --> B["RGA resize\n256×144"]
+    B --> C["NPU\nrknn inference"]
+    C --> D["bounding boxes\n[{x,y,w,h}, ...]"]
+    D --> E["RGA imrectangleArray\nтолщина=3, цвет=красный"]
+    E --> F["кадр с разметкой\nNV12 1920×1080"]
+    F --> G["VO → VOP2\n→ HDMI/LCD"]
 ```
 
 **Zero-copy**: кадр остаётся в DMA буфере на всём пути — RGA пишет прямо в dmabuf, VO читает из того же dmabuf.
@@ -443,16 +446,12 @@ VI/AVS → RGA resize (256×144) → NPU (rknn inference)
 | **Интерфейсы** | `VO_INTF_HDMI`, `VO_INTF_MIPI`, `VO_INTF_LVDS`, ... | Те же (аппаратно) | DRM connectors (HDMI, MIPI DSI, LVDS, ...) |
 
 **Иерархия на RV1126B:**
-```
-приложение
-  ↓ RK_MPI_VO_SendFrame()
-rockit VO (API)
-  ↓ ioctl()
-DRM/KMS (Linux kernel)
-  ↓ драйвер VOP2
-VOP2 (аппаратный композитор)
-  ↓
-HDMI / MIPI DSI / LVDS (физический выход)
+```mermaid
+flowchart TD
+    A["приложение"] -->|RK_MPI_VO_SendFrame| B["rockit VO (API)"]
+    B -->|ioctl| C["DRM/KMS (Linux kernel)"]
+    C -->|драйвер VOP2| D["VOP2 (аппаратный композитор)"]
+    D --> E["HDMI / MIPI DSI / LVDS\n(физический выход)"]
 ```
 
 **На RV1126B** (из rkipc `rv1126b_dual_ipc`):
@@ -470,64 +469,44 @@ NPU **не часть rockit MPI** — нет заголовков `rk_mpi_npu.h
 
 **Интеграция с rockit-пайплайном — через dmabuf (zero-copy):**
 
-```
-VI/AVS/VPSS → MB_BLK (кадр)
-  ↓ RK_MPI_MB_Handle2Fd(mb)
-dmabuf fd
-  ↓ rknn_tensor_mem.fd = dmabuf_fd
-RKNN inference (NPU читает через IOMMU, без CPU copy)
-  ↓ результаты (bounding boxes, классы)
-приложение (рисует OSD через RGN, или принимает решения)
+```mermaid
+flowchart TD
+    A["VI/AVS/VPSS"] --> B["MB_BLK (кадр)"]
+    B --> C["RK_MPI_MB_Handle2Fd(mb)"]
+    C --> D["dmabuf fd"]
+    D --> E["rknn_tensor_mem.fd = dmabuf_fd"]
+    E --> F["RKNN inference\n(NPU читает через IOMMU,\nбез CPU copy)"]
+    F --> G["результаты\n(bounding boxes, классы)"]
+    G --> H["приложение\n(OSD через RGN, или решения)"]
 ```
 
 `librga.so` (arm64) берётся из `external/rknpu2/examples/3rdparty/rga/libs/Linux/gcc-aarch64/` — RGA используется и в rockit-пайплайне, и в RKNN-примерах для препроцессинга (resize кадра под вход NPU).
 
 ### Полный пайплайн на этой плате (RV1126B + 2× GC2093)
 
+```mermaid
+flowchart TD
+    S1["GC2093 #1 (0x37)\n1920×1080 raw"] --> DPHY1["DPHY0 → CSI2"]
+    S2["GC2093 #2 (0x7e)\n1920×1080 raw"] --> DPHY2["DPHY3 → CSI2"]
+    DPHY1 --> CIF1["rkcif-mipi-lvds\n/dev/media0"]
+    DPHY2 --> CIF2["rkcif-mipi-lvds2\n/dev/media1"]
+    CIF1 --> ISP1["rkisp-vir0\n/dev/video22\nISP + 3A (rkaiq_3A_server)"]
+    CIF2 --> ISP2["rkisp-vir1\n/dev/video30\nISP + 3A (rkaiq_3A_server)"]
+    ISP1 --> VI1["VI dev0/pipe0\nchn0 MAINPATH\nRK_FMT_YUV420SP"]
+    ISP2 --> VI2["VI dev1/pipe1\nchn0 MAINPATH\nRK_FMT_YUV420SP"]
+    VI1 --> AVS["AVS grp0\nbSyncPipe=1\nNOBLEND_HOR"]
+    VI2 --> AVS
+    AVS --> MEGA["AVS chn0\nмега-кадр 3840×1080 NV12"]
+
+    MEGA -.-> P1["vi_grab_avs\nfwrite(malloc) → файл"]
+    MEGA -.-> P2["vi_grab_avs --split\nRGA crop+rotate → malloc → файл"]
+    MEGA -.-> P3["vi_grab_avs_dma --action save\nRGA crop+rotate → DMA → fwrite → файл"]
+    MEGA -.-> P4["vi_grab_avs_dma --action vo\nRGA → DMA → MB_EXT → VO → VOP2 → HDMI\n(zero-copy)"]
+    MEGA --> P5["bind AVS→VENC\nH.264 → MP4/RTSP"]
+    MEGA --> P6["bind AVS→VO\nVO video layer → VOP2 → HDMI"]
 ```
-GC2093 #1 (0x37)         GC2093 #2 (0x7e)
-  1920×1080 raw            1920×1080 raw
-       │                        │
-  DPHY0 → CSI2           DPHY3 → CSI2
-       │                        │
-  rkcif-mipi-lvds        rkcif-mipi-lvds2
-  /dev/media0            /dev/media1
-       │                        │
-  rkisp-vir0             rkisp-vir1
-  /dev/video22           /dev/video30
-  (ISP + 3A от           (ISP + 3A от
-   rkaiq_3A_server)       rkaiq_3A_server)
-       │                        │
-       ▼                        ▼
-  VI dev0/pipe0          VI dev1/pipe1
-  chn0 (MAINPATH)        chn0 (MAINPATH)
-  RK_FMT_YUV420SP        RK_FMT_YUV420SP
-       │                        │
-       └───────┬────────────────┘
-               ▼
-          AVS grp0 (bSyncPipe=1, NOBLEND_HOR)
-               │
-               ▼
-          AVS chn0 → мега-кадр 3840×1080 NV12
-               │
-               ├─→ [vi_grab_avs]      fwrite(malloc) → файл
-               │
-               ├─→ [vi_grab_avs --split]
-               │     RGA crop+rotate → malloc → файл (cam0, cam1)
-               │
-               ├─→ [vi_grab_avs_dma --action save]
-               │     RGA crop+rotate → DMA буфер → fwrite → файл
-               │
-               ├─→ [vi_grab_avs_dma --action vo]
-               │     RGA crop+rotate → DMA буфер → MB_EXT → VO → VOP2 → HDMI/LCD
-               │     (полный zero-copy: rockit dmabuf → RGA → DMA dmabuf → VOP2)
-               │
-               ├─→ [прямой bind AVS→VENC]  (как simple_vi_bind_avs_bind_venc)
-               │     AVS → VENC (H.264) → MP4/RTSP
-               │
-               └─→ [прямой bind AVS→VO]    (если не нужен RGA)
-                     AVS → VO (video layer) → VOP2 → HDMI
-```
+
+**Пунктир** — наши CLI-программы (ручной захват + RGA). **Сплошная** — rockit bind (автоматический пайплайн).
 
 ### Где что реализовано в SDK
 
@@ -1999,29 +1978,17 @@ Frame 0: 3840x1080 pts=8420618673us grab=168ms → mega_3840x1080_pts8420618673_
   Альтернатива: на плате есть готовый `/usr/bin/simple_vi_bind_avs_bind_venc` — он **сам** инициализирует `rk_aiq` и делает VI→AVS→VENC (H.264), но не сохраняет raw NV12.
 
 Топология камеры на плате (проверено через DTS + media-ctl):
-```
-Сенсорный уровень:
-  GC2093 #1 (0x37)        GC2093 #2 (0x7e)
-  1920×1080 raw           1920×1080 raw
-       │                       │
-CSI/DPHY уровень (разные DPHY):
-  dphy0 → mipi0-csi2      dphy3 → mipi2-csi2
-       │                       │
-CIF уровень (разные media-устройства):
-  rkcif-mipi-lvds         rkcif-mipi-lvds2
-  /dev/media0 (14 ent)    /dev/media1 (14 ent)
-  /dev/video0 (raw)       /dev/video11 (raw)
-       │                       │
-ISP уровень (разные ISP):
-  rkisp-vir0              rkisp-vir1
-  /dev/video22 (mainpath) /dev/video30 (mainpath)
-  max 1920×1080           max 1920×1080
-       │                       │
-       └───────┐   ┌───────────┘
-               ▼   ▼
-          AVS hardware block    ← единственное место объединения
-               │
-          3840×1080 NV12 (NOBLEND_HOR, bSyncPipe=1)
+```mermaid
+flowchart TD
+    S1["GC2093 #1 (0x37)\n1920×1080 raw"] --> D1["dphy0 → mipi0-csi2"]
+    S2["GC2093 #2 (0x7e)\n1920×1080 raw"] --> D2["dphy3 → mipi2-csi2"]
+    D1 --> C1["rkcif-mipi-lvds\n/dev/media0 (14 ent)\n/dev/video0 (raw)"]
+    D2 --> C2["rkcif-mipi-lvds2\n/dev/media1 (14 ent)\n/dev/video11 (raw)"]
+    C1 --> I1["rkisp-vir0\n/dev/video22 (mainpath)\nmax 1920×1080"]
+    C2 --> I2["rkisp-vir1\n/dev/video30 (mainpath)\nmax 1920×1080"]
+    I1 --> AVS["AVS hardware block\n← единственное место объединения"]
+    I2 --> AVS
+    AVS --> OUT["3840×1080 NV12\nNOBLEND_HOR, bSyncPipe=1"]
 ```
 
 Два отдельных ISP (vir0 и vir1) — это **Путь 3** (AVS), не Путь 1 (DTS мега-кадр). Путь 1 невозможен: нет MIPI-мультиплексора, нет общего DPHY, нет video-узла с width ≥ 3840.
@@ -2325,10 +2292,14 @@ Sensor 1 → VI dev 1 → VI pipe 1 ─┘    bSyncPipe=1
 
 В `app/rkadk/src/record/rkadk_record.c` есть `RKADK_RECORD_CreateAvsChn()` (строка 469) — она создаёт AVS group и bind'ит:
 
-```
-Main VI (cam 0) ──Bind──► AVS pipe 0 ─┐
-                                       ├──► AVS chn ──Bind──► VENC (запись)
-Sub VI (cam 1)  ──Bind──► AVS pipe 1 ─┘              └──Bind──► VPSS → VO (дисплей)
+```mermaid
+flowchart LR
+    VI0["Main VI (cam 0)"] -->|Bind| AP0["AVS pipe 0"]
+    VI1["Sub VI (cam 1)"] -->|Bind| AP1["AVS pipe 1"]
+    AP0 --> AVS["AVS chn"]
+    AP1 --> AVS
+    AVS -->|Bind| VENC["VENC (запись H.264)"]
+    AVS -->|Bind| VPSS["VPSS → VO (дисплей)"]
 ```
 
 Код из rkadk (`rkadk_record.c:1166-1230`):
