@@ -58,3 +58,11 @@ target_include_directories(vi_grab_avs PRIVATE ${ROCKIT_INCLUDE_DIR})
 target_link_directories(vi_grab_avs PRIVATE ${ROCKIT_LIB_DIR})
 target_link_libraries(vi_grab_avs rockit m pthread)
 install(TARGETS vi_grab_avs RUNTIME DESTINATION "bin")
+
+# vi_grab_avs_dma — AVS → RGA crop+rotate → DMA буфер (zero-copy, VO/rknn ready)
+add_executable(vi_grab_avs_dma vi_grab_avs_dma.c dma_alloc.c)
+target_include_directories(vi_grab_avs_dma PRIVATE
+    ${ROCKIT_INCLUDE_DIR} ${RGA_INCLUDE_DIRS})
+target_link_directories(vi_grab_avs_dma PRIVATE ${ROCKIT_LIB_DIR} ${LIB_RGA_PATH})
+target_link_libraries(vi_grab_avs_dma rockit rga m pthread)
+install(TARGETS vi_grab_avs_dma RUNTIME DESTINATION "bin")

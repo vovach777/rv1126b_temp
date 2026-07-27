@@ -102,7 +102,7 @@ CFLAGS="-O2 -I$ROCKIT_INC -I$ROCKIT_DEF -I$RGA_INC1 -I$RGA_INC2"
 LDFLAGS="-L$ROCKIT_LIB -L$LIB_RGA_PATH -lrockit -lrga -lpthread -lm"
 
 SRCDIR="$(dirname "$0")/app/vi_grab_frame"
-PROGRAMS="vi_grab_frame vi_grab_avs vi_grab_dual"
+PROGRAMS="vi_grab_frame vi_grab_avs vi_grab_avs_dma vi_grab_dual"
 
 # Если аргумент передан — собираем только указанную программу
 if [ $# -gt 0 ]; then
@@ -116,7 +116,12 @@ for prog in $PROGRAMS; do
         continue
     fi
     echo "=== Building $prog ==="
-    $CC $CFLAGS -o "build/$prog" "$src" $LDFLAGS
+    # vi_grab_avs_dma требует dma_alloc.c (выделение DMA буферов через /dev/dma_heap/)
+    extra_src=""
+    if [ "$prog" = "vi_grab_avs_dma" ]; then
+        extra_src="$SRCDIR/dma_alloc.c"
+    fi
+    $CC $CFLAGS -o "build/$prog" "$src" $extra_src $LDFLAGS
     echo "  -> build/$prog ($(stat -c%s build/$prog 2>/dev/null || wc -c < build/$prog) bytes)"
 done
 

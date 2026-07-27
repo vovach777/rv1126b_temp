@@ -33,7 +33,7 @@ parent/
 │       ├── rockit/               # MPI: mpi/sdk/include/, lib/arm64/rv1126b/linux/librockit.so
 │       └── linux-rga/            # RGA: im2d_api/, include/
 └── rv1126b_temp/                 # этот репо
-    ├── app/vi_grab_frame/        # исходники
+    ├── app/vi_grab_frame/        # исходники (4 программы + dma_alloc)
     ├── build.sh                  # сборка через zig cc
     ├── CMakeLists.txt            # сборка через cmake
     └── lib/                      # librga.so (с платы — в SDK её нет)
@@ -45,10 +45,10 @@ parent/
 # Установите zig (https://ziglang.org) — он умеет кросс-компиляцию aarch64-linux-gnu
 # SDK_PATH по умолчанию = ../sdk (соседний каталог)
 
-SDK_PATH=/path/to/sdk ./build.sh                  # собрать все 3 программы
+SDK_PATH=/path/to/sdk ./build.sh                  # собрать все 4 программы
 SDK_PATH=/path/to/sdk ./build.sh vi_grab_avs      # только одну
 
-# Результат: build/vi_grab_frame, build/vi_grab_avs, build/vi_grab_dual
+# Результат: build/vi_grab_frame, build/vi_grab_avs, build/vi_grab_avs_dma, build/vi_grab_dual
 ```
 
 **librga.so** — единственная библиотека, которой **нет в SDK** (только заголовки `external/linux-rga/`). Возьмите её с платы:
@@ -900,7 +900,10 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 - `app/vi_grab_frame/vi_grab_frame.c` — один сенсор (~250 строк)
 - `app/vi_grab_frame/vi_grab_dual.c` — два сенсора одновременно (~300 строк)
 - `app/vi_grab_frame/vi_grab_avs.c` — **аппаратное сшивание через AVS** (~400 строк)
-- `app/vi_grab_frame/CMakeLists.txt` — сборка всех трёх программ
+- `app/vi_grab_frame/vi_grab_avs_dma.c` — AVS → RGA → DMA буфер (zero-copy, VO/rknn ready, ~500 строк)
+- `app/vi_grab_frame/dma_alloc.c` — выделение DMA буферов через `/dev/dma_heap/` (C-перевод SDK-примера)
+- `app/vi_grab_frame/dma_alloc.h` — заголовок
+- `app/vi_grab_frame/CMakeLists.txt` — сборка всех четырёх программ
 
 ## CLI: vi_grab_dual — одновременный захват с двух сенсоров
 
@@ -1475,6 +1478,94 @@ python _ssh_scp.py upload vi_grab_avs /tmp/vi_grab_avs
 # Запустить на плате
 ssh root@10.0.55.160 "chmod +x /tmp/vi_grab_avs && /tmp/vi_grab_avs -w 1920 -h 1080 -n 1 -v"
 ```
+
+---
+
+## CLI: vi_grab_avs_dma — AVS → RGA → DMA буфер (zero-copy пайплайн)
+
+`vi_grab_avs_dma` — расширение `vi_grab_avs` для **полного zero-copy пайплайна**. Вместо `malloc` для выходного буфера RGA, выделяет DMA буфер через `/dev/dma_heap/system-uncached`. Этот буфер можно:
+
+1. **Сохранить в файл** (`--action save`) — слепок для отладки (как `vi_grab_avs --split`)
+2. **Отправить на дисплей** (`--action vo`) — `RK_MPI_VO_SendFrame` через `MB_EXT` (zero-copy)
+3. **Передать в rknn/NPU** — dmabuf fd совместим с `rknn_set_io_mem`
+4. **Просто освободить** (`--action free`) — benchmark пропускной способности пайплайна
+
+### В чём отличие от vi_grab_avs
+
+| | `vi_grab_avs --split` | `vi_grab_avs_dma` |
+|---|---|---|
+| Источник RGA | dmabuf fd (rockit) ✅ | dmabuf fd (rockit) ✅ |
+| Выходной буфер RGA | `malloc` (CPU RAM) | **DMA буфер** (`/dev/dma_heap/`) |
+| Запись в файл | `fwrite` из malloc | `fwrite` из mmap DMA |
+| Отправка в VO | ❌ (нужен CPU copy) | ✅ **zero-copy** (MB_EXT + dmabuf fd) |
+| Отправка в rknn | ❌ | ✅ **zero-copy** (dmabuf fd → `rknn_set_io_mem`) |
+| Освобождение | `free()` | `dma_buf_free()` (munmap + close) |
+
+### Пайплайн
+
+```
+VI dev0/1 → VI pipe0/1 → AVS grp0 → AVS chn0 (мега-кадр 3840×1080)
+  → RGA crop+rotate (zero-copy: rockit dmabuf → DMA dmabuf)
+    → cam0: DMA буфер 1920×1080 (или 1080×1920 при rot=90)
+    → cam1: DMA буфер 1920×1080
+      → [save] fwrite (слепок)
+      → [vo]   RK_MPI_VO_SendFrame (дисплей, zero-copy)
+      → [free] dma_buf_free (benchmark)
+```
+
+### Использование
+
+```bash
+# Сохранить 2 половинки в файлы (как vi_grab_avs --split, но через DMA)
+./vi_grab_avs_dma -w 1920 -h 1080 --action save
+# → cam0_1920x1080_pts123_nv12.raw
+# → cam1_1920x1080_pts123_nv12.raw
+
+# Отправить на дисплей (HDMI/LCD) через VO
+./vi_grab_avs_dma -w 1920 -h 1080 --action vo --vo-layer 0 --vo-chn 0 -n 300
+
+# Benchmark: прогнать 100 кадров, ничего не сохраняя
+./vi_grab_avs_dma -w 1920 -h 1080 --action free -n 100
+
+# С поворотом 90° (выход 1080×1920)
+./vi_grab_avs_dma -w 1920 -h 1080 --action save --rotate-cam 90
+```
+
+### Параметры (дополнительно к vi_grab_avs)
+
+| Параметр | По умолчанию | Описание |
+|----------|-------------|----------|
+| `--action save\|vo\|free` | `save` | что делать с DMA буфером |
+| `--vo-layer N` | `0` | VO layer для `--action vo` |
+| `--vo-chn N` | `0` | VO channel для `--action vo` (cam0 → chn N, cam1 → chn N+1) |
+
+### DMA буферы — как это работает
+
+```c
+// Выделение DMA буфера через /dev/dma_heap/system-uncached
+int fd; void *va;
+dma_buf_alloc("/dev/dma_heap/system-uncached", size, &fd, &va);
+
+// RGA пишет в DMA буфер (zero-copy через IOMMU)
+rga_buffer_t dst = wrapbuffer_fd_t(fd, w, h, w, h, RK_FORMAT_YCbCr_420_SP);
+improcess(src, dst, ..., IM_SYNC);
+
+// Отправка в VO (zero-copy — rockit берёт dmabuf fd напрямую)
+MB_EXT_CONFIG_S ext = { .s32Fd = fd, .pu8VirAddr = va, .u64Size = size };
+RK_MPI_SYS_CreateMB(&mb, &ext);
+RK_MPI_VO_SendFrame(layer, chn, &vf, 0);
+
+// Освобождение
+dma_buf_free(size, &fd, va);
+```
+
+`/dev/dma_heap/system-uncached` — некэшируемый DMA буфер. RGA пишет через IOMMU (без CPU), CPU читает без `dma_sync_cpu_to_device` (uncached = всегда актуальные данные). Для cached буферов (`/dev/dma_heap/system`) нужна синхронизация.
+
+### Файлы
+
+- `app/vi_grab_frame/vi_grab_avs_dma.c` — исходник (~500 строк)
+- `app/vi_grab_frame/dma_alloc.c` — выделение DMA буферов (перевод `dma_alloc.cpp` из SDK на C)
+- `app/vi_grab_frame/dma_alloc.h` — заголовок
 
 ---
 
