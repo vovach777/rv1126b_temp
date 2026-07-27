@@ -2927,6 +2927,9 @@ AVS используется **не как панорамный сшивател
 # Без camgroup (только AVS sync, без 3A sync)
 ./stereo_demo -w 1920 -h 1080 --no-camgroup --save-cam0 --save-cam1
 
+# Без VPSS (кадр напрямую из AVS, как vi_grab_avs)
+./stereo_demo -w 1920 -h 1080 --no-camgroup --no-vpss -n 1
+
 # Без LDCH (без коррекции дисторсии)
 ./stereo_demo -w 1920 -h 1080 --no-ldch --save-cam0 --save-cam1
 
@@ -2952,9 +2955,40 @@ AVS используется **не как панорамный сшивател
 | `--save-cam1` | сохранять CHN1 (правая камера) | — |
 | `--save-full` | сохранять CHN2 (полный stitch) | — |
 | `--snapshot` | использовать GetGrpFrame | — |
+| `--no-vpss` | получать кадр напрямую из AVS (без VPSS) | — |
 | `-o, --output` | префикс файла | `stereo` |
 | `-t, --timeout` | таймаут GetChnFrame (мс) | 2000 |
 | `-v, --verbose` | подробный вывод | — |
+
+### Результаты тестирования на плате (RV1126B, 10.0.55.160)
+
+Тест проводился с `--no-camgroup` (без 3A sync) и IQ-файлами из `/etc/iqfiles/`:
+
+```bash
+/tmp/stereo_demo -w 1920 -h 1080 --no-camgroup --iq-dir /etc/iqfiles \
+    --save-cam0 --save-cam1 --save-full -n 1 -s 10 -v
+```
+
+**Статистика Y-канала (NV12):**
+
+| Канал | Размер | mean | std | min | max |
+|-------|--------|------|-----|-----|-----|
+| CHN0 (cam0, crop left) | 1920×1080 | 34.3 | 1.8 | 32 | 45 |
+| CHN1 (cam1, crop right) | 1920×1080 | 67.7 | 32.0 | 35 | 230 |
+| CHN2 (full stitch) | 3840×1080 | 51.8 | 29.3 | 32 | 232 |
+| Full — left half | 1920×1080 | 34.5 | 2.0 | 32 | 49 |
+| Full — right half | 1920×1080 | 69.1 | 33.5 | 35 | 236 |
+
+**Выводы:**
+- VPSS crop работает корректно: CHN0 = left half, CHN1 = right half
+- Левая половина full stitch совпадает с CHN0 (cam0)
+- Правая половина full stitch совпадает с CHN1 (cam1)
+- Cam0 темнее (mean=34) чем cam1 (mean=68) — нужна калибровка AE
+
+**Известные проблемы:**
+- `--camgroup` (с `gc2093_IR_default.json`) даёт тёмные кадры (Y=16). Нужен правильный group IQ файл.
+- `--snapshot` (GetGrpFrame) возвращает `0xa0068008` — backup frame не готов без потребления из каналов.
+- IQ-файлы на плате в `/etc/iqfiles/` (не `/oem/usr/share/iqfiles/`). Используйте `--iq-dir /etc/iqfiles`.
 
 ### GetGrpFrame vs GetChnFrame
 
