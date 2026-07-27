@@ -163,7 +163,7 @@ VPSS и RGA **пересекаются по функциональности** (
 |------------------|-----|-------------|
 | **Fan-out: 1 вход → 4 выхода** одновременно | ❌ | VPSS group имеет до 4 каналов (`VPSS_CHN0-3`), каждый со своим разрешением/форматом. RGA делает 1 blit за вызов. |
 | **Интеграция в rockit bind-пайплайн** | ❌ | VPSS — полноценный узел `RK_MPI_SYS_Bind(VI→VPSS, VPSS→VENC, VPSS→VO)`. RGA — вне rockit, вызывается вручную. |
-| **`VIDEO_PROC_DEV_VPSS`** — аппаратный VPSS-блок | ❌ | На чипах с аппаратным VPSS (RK3588) — отдельный блок. На RV1126B его нет, используется GPU/RGA. |
+| **`VIDEO_PROC_DEV_VPSS`** — аппаратный VPSS-блок | ❌ | На RV1126B **есть** аппаратный VPSS (TRM: `0x21D20000`, 64KB) и VPSS_LITE (`0x21D30000`). По умолчанию в rkipc `vpss_proc_dev = vpss`. RGA такого не умеет. |
 | **`VIDEO_PROC_DEV_GPU`** — обработка через GPU | ❌ | VPSS может делегировать на GPU (медленнее RGA, но гибче). |
 | **`VIDEO_PROC_DEV_ISP`** — обработка через ISP | ❌ | VPSS может использовать ISP для scaling (только на некоторых чипах). |
 | **`COMPRESS_RFBC_64x4`** — аппаратное сжатие | ❌ | VPSS умеет AFBC/RFBC compression для экономии памяти. RGA — нет. |
@@ -272,21 +272,28 @@ improcess(src, dst, pat, srect, drect, prect, IM_HAL_TRANSFORM_ROT_90 | IM_SYNC)
 5. **Нужен произвольный dmabuf** — из `/dev/dma_heap/`, от GPU, от другого процесса. VPSS — только rockit.
 6. **Простая операция над одним кадром** — crop + rotate. Создавать VPSS group ради одного кадра — оверкилл.
 
-#### VPSS на RV1126B — особенность
+#### VPSS на RV1126B — аппаратный блок есть
 
-На RV1126B **нет аппаратного VPSS-блока** (в отличие от RK3588). Поэтому `enVProcDev` может быть:
-- `VIDEO_PROC_DEV_RGA` — VPSS использует RGA под капотом (по умолчанию)
-- `VIDEO_PROC_DEV_GPU` — VPSS использует GPU
-- `VIDEO_PROC_DEV_VPSS` — на RV1126B может не работать (нет железа)
+> **Исправление**: ранее здесь было неверное утверждение, что на RV1126B нет аппаратного VPSS. Это **ошибка**.
 
-Это значит, что на RV1126B **VPSS — это обёртка над RGA**, но с добавленной логикой:
-- fan-out на 4 канала
-- bind-интеграция с rockit
-- AFBC/RFBC compression
-- aspect ratio
-- backup frame
+Согласно **RV1126B TRM V1.1 Part1** (rockchip.fr), в memory map:
+- **VPSS** — `0x21D20000`, 64KB register space — аппаратный блок
+- **VPSS_LITE** — `0x21D30000`, 64KB register space — лёгкая версия
 
-**Производительность**: прямой вызов RGA (`improcess`) быстрее, чем VPSS→RGA (меньше прослоек). Но VPSS удобнее для сложного пайплайна.
+И в rkipc ini-файлах для RV1126B (`rkipc-3840x2160.ini`, `rkipc-3200x1800.ini`, `rkipc-2688x1520.ini`):
+```ini
+[video.source]
+vpss_proc_dev = vpss    ; ← VIDEO_PROC_DEV_VPSS (аппаратный), НЕ rga
+```
+
+То есть на RV1126B **по умолчанию используется аппаратный VPSS**, а не RGA-под-капотом.
+
+`enVProcDev` может быть:
+- `VIDEO_PROC_DEV_VPSS` — **аппаратный VPSS-блок** (по умолчанию в rkipc для RV1126B)
+- `VIDEO_PROC_DEV_RGA` — fallback на RGA (если VPSS занят или не нужен)
+- `VIDEO_PROC_DEV_GPU` — fallback на GPU
+
+**Производительность**: аппаратный VPSS быстрее RGA для scale/crop (специализированный конвейер). Прямой вызов RGA (`improcess`) удобнее для одиночных операций вне rockit-пайплайна.
 
 #### Сводная таблица: VPSS vs RGA
 
@@ -298,7 +305,7 @@ improcess(src, dst, pat, srect, drect, prect, IM_HAL_TRANSFORM_ROT_90 | IM_SYNC)
 | **Выход** | `RK_MPI_VPSS_GetChnFrame` (rockit MB_BLK) | `rga_buffer_t dst` (любой dmabuf) |
 | **Fan-out** | **1 → 4 канала** (разные разрешения) | 1 → 1 (один blit за вызов) |
 | **Bind** | `RK_MPI_SYS_Bind(VI→VPSS, VPSS→VENC)` | нет (вне rockit) |
-| **Аппаратный блок** | На RV1126B — **использует RGA** под капотом | RGA2/RGA3 напрямую |
+| **Аппаратный блок** | На RV1126B — **аппаратный VPSS** (`0x21D20000`) + VPSS_LITE (`0x21D30000`), по умолчанию `VIDEO_PROC_DEV_VPSS` | RGA2/RGA3 напрямую |
 | **Compression** | AFBC_16x16, RFBC_64x4 | нет |
 | **Aspect ratio** | `ASPECT_RATIO_AUTO/MANUAL` (auto letterbox) | вручную |
 | **Alpha blend** | нет | да (src over pat) |
@@ -458,7 +465,7 @@ VPSS — это **внутренний узел rockit-пайплайна**. Е�
 | **Передать на VENC** (через bind) | VENC | `RK_MPI_SYS_Bind(VPSS→VENC)` — стандарт |
 | **Передать на NPU?** | ❌ НЕТ напрямую | NPU не rockit-модуль (`RK_ID_NPU` нет в `MOD_ID_E`) |
 | **Получить кадр вручную** | приложение | `RK_MPI_VPSS_GetChnFrame(grp, chn, &frame, timeout)` → MB_BLK |
-| **Выбор железа под капотом** | RV1126B | `enVProcDev = VIDEO_PROC_DEV_RGA / GPU / VPSS` |
+| **Выбор железа** | RV1126B | `enVProcDev = VIDEO_PROC_DEV_VPSS` (по умолчанию, аппаратный) / `RGA` / `GPU` |
 
 #### Что VPSS НЕ МОЖЕТ
 
@@ -481,7 +488,7 @@ flowchart LR
     VI1["VI cam1"] -->|Bind| AP1["AVS pipe 1"]
     AP0 --> AVS["AVS grp\nstitch → мега-кадр"]
     AP1 --> AVS
-    AVS -->|Bind| VPSS["VPSS_GRP\n(enVProcDev=RGA\nна RV1126B)"]
+    AVS -->|Bind| VPSS["VPSS_GRP\n(enVProcDev=VPSS\nаппаратный блок)"]
     VPSS --> CHN0["VPSS_CHN0\n1920×1080"] --> VENC0["VENC0\nmain stream"]
     VPSS --> CHN1["VPSS_CHN1\n640×360"] --> VENC1["VENC1\nsub stream"]
     VPSS --> CHN2["VPSS_CHN2\n256×144"] --> NPU_OUT["GetChnFrame\n→ dmabuf fd\n→ rknn"]
