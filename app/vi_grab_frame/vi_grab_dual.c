@@ -324,14 +324,24 @@ int main(int argc, char **argv) {
             fprintf(stderr, "sensor %d: SetChnAttr failed: %#x\n", i, ret);
             goto cleanup_dev;
         }
-        ret = RK_MPI_VI_EnableChn(app.sensors[i].pipeId, app.sensors[i].channelId);
+        ret = RK_MPI_VI_EnableChnExt(app.sensors[i].pipeId, app.sensors[i].channelId);
         if (ret != RK_SUCCESS) {
-            fprintf(stderr, "sensor %d: EnableChn failed: %#x\n", i, ret);
+            fprintf(stderr, "sensor %d: EnableChnExt failed: %#x\n", i, ret);
             goto cleanup_chn;
         }
-        if (app.verbose) printf("sensor %d: chn %d enabled (%dx%d)\n",
+        if (app.verbose) printf("sensor %d: chn %d EnableChnExt OK (%dx%d)\n",
                                 i, app.sensors[i].channelId,
                                 app.sensors[i].width, app.sensors[i].height);
+    }
+
+    /* group mode: все каналы должны быть готовы до StartPipe (как rkipc_multi_vi_init) */
+    for (i = 0; i < NUM_SENSORS; i++) {
+        ret = RK_MPI_VI_StartPipe(app.sensors[i].pipeId);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "pipe %d: StartPipe failed: %#x\n", i, ret);
+            goto cleanup_chn;
+        }
+        if (app.verbose) printf("pipe %d: StartPipe OK\n", i);
     }
 
     /* 4. Захват пар кадров */
@@ -383,6 +393,8 @@ int main(int argc, char **argv) {
 
     /* 5. Очистка */
 cleanup_chn:
+    for (i = 0; i < NUM_SENSORS; i++)
+        RK_MPI_VI_StopPipe(app.sensors[i].pipeId);
     for (i = 0; i < NUM_SENSORS; i++)
         RK_MPI_VI_DisableChn(app.sensors[i].pipeId, app.sensors[i].channelId);
 
