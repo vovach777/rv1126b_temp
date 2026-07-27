@@ -1,12 +1,15 @@
 # RV1126B Dual Camera SDK
 
-Отфильтрованный SDK Rockchip RV1126B с поддержкой **двухкамерного отображения** (dual camera display). Репозиторий содержит только необходимую часть SDK — `app/` и `external/rockit/` — без тяжёлой истории и kernel/uboot.
+CLI-программы для стереокамеры на базе Rockchip RV1126B: захват мега-кадра через AVS, нарезка на cam0/cam1 через RGA (hardware 2D engine), поворот, сохранение в NV12.
+
+**Репозиторий содержит только наши программы** (`app/`) + документацию (`README.md`, `docs/`). Заголовки и библиотеки SDK **не включены** — предполагается, что у пользователя есть тот же SDK рядом (см. [Сборка](#сборка)).
 
 ## Источник
 
 - **Origin SDK:** `rv1126b-linux6.1` (Rockchip RV1126B, ядро Linux 6.1)
 - **Базовый коммит:** `7285d5c2f` ("Fix(4g): EC20 LTE automatic connection at startup")
-- **Содержимое:** `app/` (ipcweb-backend, lvgl_demo, rkadk, rkipc) + `external/rockit/`
+- **Содержимое репо:** `app/` (наши CLI), `docs/` (картинки), `README.md`, `build.sh`, `CMakeLists.txt`
+- **Содержимое SDK (не в репо):** `external/rockit/` (MPI), `external/linux-rga/` (RGA), `external/camera_engine_rkaiq/` (rkaiq)
 
 ## Поддерживаемые платформы
 
@@ -16,6 +19,74 @@
 | RV1126 | arm32 | `rv1126_ipc_rockit`, `rv1126_aiisp_ipc`, `rv1126_battery_ipc`, и др. |
 | RV1106 / RV1103B | arm32 | `rv1106_ipc`, `rv1106_dual_ipc`, и др. |
 | RK3588 / RK3576 | arm64 | `rk3588_ipc`, `rk3576_ipc` |
+
+---
+
+## Сборка
+
+Репозиторий **не включает SDK** — заголовки и `librockit.so` берутся из RV1126B SDK (см. [Источник](#источник)). Структура каталогов:
+
+```
+parent/
+├── sdk/                          # RV1126B SDK (external/rockit, external/linux-rga, ...)
+│   └── external/
+│       ├── rockit/               # MPI: mpi/sdk/include/, lib/arm64/rv1126b/linux/librockit.so
+│       └── linux-rga/            # RGA: im2d_api/, include/
+└── rv1126b_temp/                 # этот репо
+    ├── app/vi_grab_frame/        # исходники
+    ├── build.sh                  # сборка через zig cc
+    ├── CMakeLists.txt            # сборка через cmake
+    └── lib/                      # librga.so (с платы — в SDK её нет)
+```
+
+### Способ 1: build.sh (zig cc, рекомендуется)
+
+```bash
+# Установите zig (https://ziglang.org) — он умеет кросс-компиляцию aarch64-linux-gnu
+# SDK_PATH по умолчанию = ../sdk (соседний каталог)
+
+SDK_PATH=/path/to/sdk ./build.sh                  # собрать все 3 программы
+SDK_PATH=/path/to/sdk ./build.sh vi_grab_avs      # только одну
+
+# Результат: build/vi_grab_frame, build/vi_grab_avs, build/vi_grab_dual
+```
+
+**librga.so** — единственная библиотека, которой **нет в SDK** (только заголовки `external/linux-rga/`). Возьмите её с платы:
+
+```bash
+scp root@<board-ip>:/usr/lib/librga.so lib/
+```
+
+### Способ 2: CMake (для совместимости с SDK)
+
+```bash
+mkdir build && cd build
+cmake -DSDK_PATH=/path/to/sdk ..
+make
+
+# Кросс-компиляция (aarch64):
+cmake -DSDK_PATH=/path/to/sdk -DCMAKE_TOOLCHAIN_FILE=../aarch64-toolchain.cmake ..
+make
+```
+
+`aarch64-toolchain.cmake` автоматически находит `zig` или `aarch64-linux-gnu-gcc`.
+
+### Что нужно от SDK
+
+| Путь в SDK | Что | Используется |
+|------------|-----|--------------|
+| `external/rockit/mpi/sdk/include/` | `rk_mpi_*.h`, `rk_comm_*.h` | все программы |
+| `external/rockit/lib/arm64/rv1126b/` | `rk_defines.h` | все программы |
+| `external/rockit/lib/arm64/rv1126b/linux/` | `librockit.so` | линковка |
+| `external/linux-rga/im2d_api/` | `im2d_*.h` (RGA C API) | vi_grab_avs (--split) |
+| `external/linux-rga/include/` | `rga.h`, `drmrga.h` | vi_grab_avs (--split) |
+
+### Загрузка на плату
+
+```bash
+scp build/vi_grab_avs root@10.0.55.160:/tmp/
+ssh root@10.0.55.160 "/etc/init.d/S40rkaiq_3A start; /tmp/vi_grab_avs -w 1920 -h 1080 --split --rotate-cam 90"
+```
 
 ---
 
@@ -556,7 +627,7 @@ TGI — это графовый движок Rockchip, который позво
 
 #### Что есть в SDK
 
-В `external/rockit/tgi/sdk/`:
+В SDK (не в этом репо), в `external/rockit/tgi/sdk/`:
 - **50+ заголовков** (`RTTaskGraph.h`, `RTTaskNode.h`, `RTMediaRockx.h`, `RTUVCGraph.h`, и др.)
 - **14 JSON-конфигов** пайплайнов (см. ниже)
 - **PDF-документация** (`tgi/doc/Rockchip_Developer_Guide_Linux_Rockit_CN.pdf`)
@@ -1271,7 +1342,7 @@ Done: skipped=3, saved=1/1
 **RGA детали:**
 - `librga.so.2.1.0` уже на плате (`/usr/lib/librga.so`)
 - `/dev/rga` — устройство RGA (hardware 2D engine)
-- Заголовки: `external/librga/im2d_api/` (im2d C API: `improcess`, `wrapbuffer_fd_t`)
+- Заголовки: `external/linux-rga/im2d_api/` (im2d C API: `improcess`, `wrapbuffer_fd_t`) — из SDK
 - Формат: `RK_FORMAT_YCbCr_420_SP` (NV12)
 - Crop + rotate: `improcess(src, dst, pat, srect, drect, prect, usage=ROT_90|IM_SYNC)` — один вызов RGA
 
@@ -1370,12 +1441,18 @@ ISP уровень (разные ISP):
 # Скачать librockit.so с платы (для линковки)
 python _ssh_scp.py download librockit.so /usr/lib/librockit.so
 
-# Кросс-компиляция (на Windows, для aarch64-linux)
+# Кросс-компиляция (ручная, для aarch64-linux)
+# Лучше использовать build.sh — он сам подставляет пути к SDK
+SDK_PATH=/path/to/sdk ./build.sh vi_grab_avs
+
+# Или вручную через zig cc:
 zig cc -target aarch64-linux-gnu -O2 \
-  -I sdk/external/rockit/mpi/sdk/include \
-  -I sdk/external/rockit/lib/arm64/rv1126b \
-  -L _board_lib -lrockit -lpthread -lm \
-  -o vi_grab_avs app/vi_grab_frame/vi_grab_avs.c
+  -I $SDK_PATH/external/rockit/mpi/sdk/include \
+  -I $SDK_PATH/external/rockit/lib/arm64/rv1126b \
+  -I $SDK_PATH/external/linux-rga/im2d_api \
+  -I $SDK_PATH/external/linux-rga/include \
+  -L lib -lrockit -lrga -lpthread -lm \
+  -o build/vi_grab_avs app/vi_grab_frame/vi_grab_avs.c
 
 # Загрузить на плату
 python _ssh_scp.py upload vi_grab_avs /tmp/vi_grab_avs
@@ -1923,28 +2000,31 @@ rkadk_dual_disp_test -W 256 -H 0 -g 8 -s 0
 ```
 .
 ├── app/
-│   ├── ipcweb-backend/     # REST API backend для IP-камер
-│   ├── lvgl_demo/          # LVGL UI демо
-│   ├── rkadk/              # Rockchip ADK (media framework)
-│   │   ├── examples/       # Тестовые приложения
-│   │   │   └── rkadk_dual_disp_test.c   # ← NEW: dual camera test
-│   │   ├── inicfg/
-│   │   │   ├── rv1106_1103/  # ini для RV1106/RV1103B
-│   │   │   └── rv1126b/      # ini для RV1126B
-│   │   └── src/display/rkadk_disp.c   # ← MODIFIED: per-CamId handles
-│   └── rkipc/              # Rockchip IPC приложение
-│       └── src/
-│           ├── rv1126b_ipc/
-│           ├── rv1126b_dv/
-│           ├── rv1126b_dual_ipc/
-│           └── ...         # конфиги для разных платформ
-├── external/rockit/        # Rockit MPI (медиа API)
-│   ├── lib/arm/rv1126b/    # 32-бит библиотеки
-│   ├── lib/arm64/rv1126b/  # 64-бит библиотеки
-│   └── mpi/                # MPI headers и examples
-├── dual_camera_patch.diff            # патч RV1106
-├── dual_camera_patch_rv1126b.diff    # патч RV1126B
-└── dual_camera_patch_README.md       # оригинальное описание
+│   └── vi_grab_frame/      # наши CLI-программы
+│       ├── vi_grab_frame.c     # захват одного сенсора
+│       ├── vi_grab_avs.c       # AVS мега-кадр + --split + --rotate-cam (RGA)
+│       └── vi_grab_dual.c      # захват двух сенсоров без AVS
+├── docs/                   # картинки для README
+│   └── images/
+│       ├── split_rot0.png          # --split без поворота
+│       ├── split_rot90.png         # --split --rotate-cam 90 (portrait)
+│       └── split_rotations.png     # все 3 поворота
+├── build.sh                # сборка через zig cc (SDK_PATH=../sdk)
+├── CMakeLists.txt          # сборка через cmake
+├── aarch64-toolchain.cmake # кросс-компиляция (zig или aarch64-gcc)
+├── lib/                    # librga.so (с платы — в SDK её нет)
+│   ├── librga.so
+│   └── librockit.so        # (опционально — можно брать из SDK)
+├── .gitignore
+└── README.md
+```
+
+**SDK (не в репо, отдельно):**
+```
+sdk/external/
+├── rockit/                 # MPI: mpi/sdk/include/, lib/arm64/rv1126b/linux/librockit.so
+├── linux-rga/              # RGA: im2d_api/, include/
+└── camera_engine_rkaiq/    # rkaiq + Findlibrga.cmake
 ```
 
 ## Git-история

@@ -28,3 +28,23 @@ TAGS
 GPATH
 GRTAGS
 GSYMS
+
+# Temporary dev scripts and test artifacts (not for repo)
+_*.py
+_*.sh
+_*.txt
+_split_test/
+_board_lib/
+
+# Raw test captures (large, regenerate on demand)
+*.raw
+*.h264
+*.nv12
+mega_*.raw
+mega_*.png
+mega_preview.png
+test*.raw
+avs0.*
+mega_frame*.raw
+mega_warmup*.raw
+
