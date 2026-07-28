@@ -116,7 +116,6 @@ static void usage(const char *prog) {
         "Options:\n"
         "  -w, --width <W>       single sensor width (required)\n"
         "  -h, --height <H>      single sensor height (required)\n"
-        "  -m, --mode <MODE>     AVS mode: hor, ver, blend (default: hor)\n"
         "  -c, --channel <ID>    VI channel id (default: %d = MAINPATH)\n"
         "  -o, --output <PFX>    output file prefix (default: \"cam\")\n"
         "  -n, --count <N>       number of frames to process (default: %d)\n"
@@ -146,19 +145,10 @@ static void usage(const char *prog) {
         prog, prog, prog, prog);
 }
 
-static int parse_mode(const char *s) {
-    if (!strcmp(s, "hor"))    return AVS_MODE_NOBLEND_HOR;
-    if (!strcmp(s, "ver"))    return AVS_MODE_NOBLEND_VER;
-    if (!strcmp(s, "blend"))  return AVS_MODE_BLEND;
-    fprintf(stderr, "Unknown mode: %s (use hor/ver/blend)\n", s);
-    return -1;
-}
-
 static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     static struct option long_opts[] = {
         {"width",   required_argument, 0, 'w'},
         {"height",  required_argument, 0, 'h'},
-        {"mode",    required_argument, 0, 'm'},
         {"channel", required_argument, 0, 'c'},
         {"output",  required_argument, 0, 'o'},
         {"count",   required_argument, 0, 'n'},
@@ -179,7 +169,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->width = 0;
     ctx->height = 0;
-    ctx->mode = AVS_MODE_NOBLEND_HOR;
+    ctx->mode = AVS_MODE_NOBLEND_VER;
     ctx->channelId = DEFAULT_CHANNEL_ID;
     ctx->frameCount = DEFAULT_FRAME_COUNT;
     ctx->skipFrames = 0;
@@ -197,16 +187,10 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     strcpy(ctx->outputPrefix, "cam");
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "w:h:m:c:o:n:s:t:v", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "w:h:c:o:n:s:t:v", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'w': ctx->width = atoi(optarg); break;
             case 'h': ctx->height = atoi(optarg); break;
-            case 'm': {
-                int m = parse_mode(optarg);
-                if (m < 0) return -1;
-                ctx->mode = m;
-                break;
-            }
             case 'c': ctx->channelId = atoi(optarg); break;
             case 'o': strncpy(ctx->outputPrefix, optarg, sizeof(ctx->outputPrefix) - 1); break;
             case 'n': ctx->frameCount = atoi(optarg); break;
@@ -242,12 +226,6 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
 
     if (ctx->width <= 0 || ctx->height <= 0) {
         fprintf(stderr, "Error: width and height are required\n\n");
-        usage(argv[0]);
-        return -1;
-    }
-
-    if (ctx->mode == AVS_MODE_BLEND && ctx->calibFile[0] == '\0') {
-        fprintf(stderr, "Error: blend mode requires --calib <FILE>\n\n");
         usage(argv[0]);
         return -1;
     }
