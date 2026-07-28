@@ -123,6 +123,7 @@ typedef struct {
     int rectInset;        /* отступ рамки от края (по умолчанию 50) */
     int rectThick;        /* толщина рамки (по умолчанию 4) */
     int useVpss;          /* --vpss: VI → VPSS → GetChnFrame (вместо VI напрямую) */
+    int vpssScale;        /* --vpss-scale: VPSS scale до pre-rotate размера дисплея */
 } app_ctx_t;
 
 static volatile int g_exit = 0;
@@ -157,6 +158,8 @@ static void usage(const char *prog) {
         "  --rect-thick <N>        rect border thickness in px (default: %d)\n"
         "  --vpss                  route VI → VPSS (passthrough) → GetChnFrame\n"
         "                          (default: VI directly, no VPSS)\n"
+        "  --vpss-scale            with --vpss + --action vo: VPSS scales to\n"
+        "                          pre-rotate display size (1280x720), RGA rotate only\n"
         "  --help                  show this help\n"
         "\n"
         "Examples:\n"
@@ -189,6 +192,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
         {"rect-inset",      required_argument, 0, 1007},
         {"rect-thick",      required_argument, 0, 1008},
         {"vpss",            no_argument,       0, 1009},
+        {"vpss-scale",      no_argument,       0, 1010},
         {"help",            no_argument,       0, '?'},
         {0, 0, 0, 0}
     };
@@ -204,6 +208,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     int switchInt = 1;
     int rectEn = 0, rectInset = DEFAULT_RECT_INSET, rectThick = DEFAULT_RECT_THICK;
     int useVpss = 0;
+    int vpssScale = 0;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "w:h:W:H:c:o:n:t:v", long_opts, NULL)) != -1) {
@@ -230,6 +235,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
             case 1007: rectInset = atoi(optarg); break;
             case 1008: rectThick = atoi(optarg); break;
             case 1009: useVpss = 1; break;
+            case 1010: vpssScale = 1; break;
             case '?':
             default:
                 usage(argv[0]);
@@ -269,6 +275,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     app->rectInset = rectInset;
     app->rectThick = rectThick;
     app->useVpss = useVpss;
+    app->vpssScale = vpssScale;
 
     return 0;
 }
@@ -360,6 +367,7 @@ static rga_buffer_t pat_dummy(void) {
 }
 
 static int rga_scale_rotate_to_mmz(MB_BLK src_mb, int src_w, int src_h,
+                                    int src_vw, int src_vh,
                                     int dst_w, int dst_h, int verbose,
                                     MB_BLK dst_blk) {
     int src_fd = RK_MPI_MB_Handle2Fd(src_mb);
@@ -370,7 +378,7 @@ static int rga_scale_rotate_to_mmz(MB_BLK src_mb, int src_w, int src_h,
     }
 
     rga_buffer_t src = wrapbuffer_fd_t(src_fd, src_w, src_h,
-                                       src_w, src_h, RK_FORMAT_YCbCr_420_SP);
+                                       src_vw, src_vh, RK_FORMAT_YCbCr_420_SP);
     rga_buffer_t dst = wrapbuffer_fd_t(dst_fd, dst_w, dst_h, dst_w, dst_h,
                                        RK_FORMAT_BGRA_8888);
 
@@ -388,8 +396,8 @@ static int rga_scale_rotate_to_mmz(MB_BLK src_mb, int src_w, int src_h,
     }
 
     if (verbose)
-        printf("  [rga] scale+rotate: %dx%d → %dx%d rot=90\n",
-               src_w, src_h, dst_w, dst_h);
+        printf("  [rga] scale+rotate: %dx%d(vir %dx%d) → %dx%d rot=90\n",
+               src_w, src_h, src_vw, src_vh, dst_w, dst_h);
     return 0;
 }
 
@@ -458,13 +466,25 @@ static int draw_rect(MB_BLK blk, int w, int h, int inset, int thickness, int cam
 }
 
 /*
- * VPSS init: создать по одной группе на сенсор (passthrough, без crop).
- * Группа i принимает кадр от VI pipe i, отдаёт через CHN0 без изменений.
+ * VPSS init: создать по одной группе на сенсор.
+ * При --vpss-scale + ACTION_VO: VPSS scale до pre-rotate размера (displayH × displayW = 1280×720),
+ *   RGA потом rotate 90 → displayW × displayH (720×1280 portrait).
+ * Иначе: passthrough (sensor size, без scale).
  * GetChnFrame делается из VPSS вместо VI.
  */
 static int vpss_init(app_ctx_t *app) {
     for (int i = 0; i < NUM_SENSORS; i++) {
         int grp = VPSS_GRP_BASE + i;
+        /* При --vpss-scale + ACTION_VO: VPSS scale до pre-rotate размера (displayH × displayW).
+         * RGA потом сделает rotate 90 → displayW × displayH (portrait).
+         * Иначе: passthrough (sensor size, без scale). */
+        int chn_w = app->sensors[i].width;
+        int chn_h = app->sensors[i].height;
+        if (app->vpssScale && app->action == ACTION_VO && app->voDispW > 0) {
+            chn_w = app->voDispH;  /* 1280 (landscape pre-rotate) */
+            chn_h = app->voDispW;  /* 720  (landscape pre-rotate) */
+        }
+
         VPSS_GRP_ATTR_S gattr;
         memset(&gattr, 0, sizeof(gattr));
         gattr.u32MaxW = app->sensors[i].width;
@@ -488,11 +508,11 @@ static int vpss_init(app_ctx_t *app) {
         cattr.enPixelFormat = RK_FMT_YUV420SP;
         cattr.stFrameRate.s32SrcFrameRate = -1;
         cattr.stFrameRate.s32DstFrameRate = -1;
-        cattr.u32Width = app->sensors[i].width;
-        cattr.u32Height = app->sensors[i].height;
+        cattr.u32Width = chn_w;
+        cattr.u32Height = chn_h;
         cattr.enCompressMode = COMPRESS_MODE_NONE;
-        cattr.u32FrameBufCnt = 2;
-        cattr.u32Depth = 1;
+        cattr.u32FrameBufCnt = 4;
+        cattr.u32Depth = 2;
 
         ret = RK_MPI_VPSS_SetChnAttr(grp, VPSS_CHN_ID, &cattr);
         if (ret != RK_SUCCESS) {
@@ -525,9 +545,9 @@ static int vpss_init(app_ctx_t *app) {
             return -1;
         }
         if (app->verbose)
-            printf("vpss: grp[%d] OK, VI[%d,%d] -> VPSS[%d,0] bound (%dx%d)\n",
+            printf("vpss: grp[%d] OK, VI[%d,%d] -> VPSS[%d,0] bound (out %dx%d)\n",
                     grp, app->sensors[i].devId, app->sensors[i].channelId,
-                    grp, app->sensors[i].width, app->sensors[i].height);
+                    grp, chn_w, chn_h);
     }
     return 0;
 }
@@ -756,35 +776,41 @@ int main(int argc, char **argv) {
 
     /* 3b. VPSS init (only for --vpss) */
     int vpss_inited = 0;
-    if (app.useVpss) {
-        if (vpss_init(&app) != 0) {
-            fprintf(stderr, "VPSS init failed\n");
-            goto cleanup_chn;
-        }
-        vpss_inited = 1;
-        printf("Pipeline: VI×2 → VPSS×2 (passthrough) → %s\n",
-               (app.action == ACTION_VO) ? "RGA → VO" : "save/free");
-    } else if (app.verbose) {
-        printf("Pipeline: VI×2 (direct, no VPSS) → %s\n",
-               (app.action == ACTION_VO) ? "RGA → VO" : "save/free");
-    }
-
     int vo_inited = 0;
 
-    /* 4a. VO init (only for --action vo) */
+    /* 4a. VO init (only for --action vo) — ДО VPSS, чтобы знать display size */
     if (app.action == ACTION_VO) {
         if (vo_init(&app) != 0) {
             fprintf(stderr, "VO init failed\n");
-            goto cleanup_vpss;
+            goto cleanup_chn;
         }
         vo_inited = 1;
+    }
+
+    if (app.useVpss) {
+        if (vpss_init(&app) != 0) {
+            fprintf(stderr, "VPSS init failed\n");
+            goto cleanup_vo;
+        }
+        vpss_inited = 1;
+        if (app.action == ACTION_VO && app.vpssScale)
+            printf("Pipeline: VI×2 → VPSS×2 (scale→%dx%d) → RGA rotate → VO %dx%d\n",
+                   app.voDispH, app.voDispW, app.voDispW, app.voDispH);
+        else
+            printf("Pipeline: VI×2 → VPSS×2 (passthrough %dx%d) → %s\n",
+                   app.sensors[0].width, app.sensors[0].height,
+                   (app.action == ACTION_VO) ? "RGA scale+rotate → VO" : "save/free");
+    } else if (app.verbose) {
+        printf("Pipeline: VI×2 (direct, no VPSS) → %s\n",
+               (app.action == ACTION_VO) ? "RGA scale+rotate → VO" : "save/free");
     }
 
     /* 4b. Захват кадров */
     if (app.action == ACTION_VO) {
         /* ---- VO mode: поочерёдный вывод камер на дисплей ---- */
-        printf("Pipeline: VI×2 (independent) → RGA scale+rotate → VO (display %dx%d)\n",
-               app.voDispW, app.voDispH);
+        if (!app.useVpss)
+            printf("Pipeline: VI×2 (independent) → RGA scale+rotate → VO (display %dx%d)\n",
+                   app.voDispW, app.voDispH);
         printf("Switching cameras every %d sec\n", app.switchInterval);
 
         /* Allocate double-buffered MMZ (VO holds one, we fill other) */
@@ -825,12 +851,15 @@ int main(int argc, char **argv) {
             long long t_grab = get_now_ms() - t_start;
             int w = stViFrame.stVFrame.u32Width;
             int h = stViFrame.stVFrame.u32Height;
+            int vw = stViFrame.stVFrame.u32VirWidth;
+            int vh = stViFrame.stVFrame.u32VirHeight;
             long long pts_us = (long long)stViFrame.stVFrame.u64PTS;
 
             /* RGA scale+rotate → MMZ */
             MB_BLK cur_blk = app.panBlk[app.panIdx];
             app.panIdx ^= 1;
             ret = rga_scale_rotate_to_mmz(stViFrame.stVFrame.pMbBlk, w, h,
+                                          vw, vh,
                                           app.voDispW, app.voDispH,
                                           app.verbose, cur_blk);
             if (ret) {
