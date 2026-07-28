@@ -55,10 +55,12 @@
 #include "rk_common.h"
 #include "rk_comm_vi.h"
 #include "rk_comm_vo.h"
+#include "rk_comm_vpss.h"
 #include "rk_comm_video.h"
 #include "rk_mpi_vi.h"
 #include "rk_mpi_mb.h"
 #include "rk_mpi_vo.h"
+#include "rk_mpi_vpss.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_mmz.h"
 
@@ -72,6 +74,8 @@
 #define NUM_SENSORS         2
 #define DEFAULT_RECT_INSET  50
 #define DEFAULT_RECT_THICK  4
+#define VPSS_GRP_BASE       2  /* VPSS group ids: 2,3 (avoid 0,1 reserved) */
+#define VPSS_CHN_ID         0
 
 /* Что делать с кадром */
 typedef enum {
@@ -118,6 +122,7 @@ typedef struct {
     int rectEnabled;      /* --rect: рисовать рамку цвета камеры */
     int rectInset;        /* отступ рамки от края (по умолчанию 50) */
     int rectThick;        /* толщина рамки (по умолчанию 4) */
+    int useVpss;          /* --vpss: VI → VPSS → GetChnFrame (вместо VI напрямую) */
 } app_ctx_t;
 
 static volatile int g_exit = 0;
@@ -150,6 +155,8 @@ static void usage(const char *prog) {
         "  --rect                  draw colored border rect (cam0=green, cam1=red)\n"
         "  --rect-inset <N>        rect inset from edge in px (default: %d)\n"
         "  --rect-thick <N>        rect border thickness in px (default: %d)\n"
+        "  --vpss                  route VI → VPSS (passthrough) → GetChnFrame\n"
+        "                          (default: VI directly, no VPSS)\n"
         "  --help                  show this help\n"
         "\n"
         "Examples:\n"
@@ -181,6 +188,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
         {"rect",            no_argument,       0, 1006},
         {"rect-inset",      required_argument, 0, 1007},
         {"rect-thick",      required_argument, 0, 1008},
+        {"vpss",            no_argument,       0, 1009},
         {"help",            no_argument,       0, '?'},
         {0, 0, 0, 0}
     };
@@ -195,6 +203,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     int voDev = 0, voLayer = 1, voChn = 0;
     int switchInt = 1;
     int rectEn = 0, rectInset = DEFAULT_RECT_INSET, rectThick = DEFAULT_RECT_THICK;
+    int useVpss = 0;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "w:h:W:H:c:o:n:t:v", long_opts, NULL)) != -1) {
@@ -220,6 +229,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
             case 1006: rectEn = 1; break;
             case 1007: rectInset = atoi(optarg); break;
             case 1008: rectThick = atoi(optarg); break;
+            case 1009: useVpss = 1; break;
             case '?':
             default:
                 usage(argv[0]);
@@ -258,6 +268,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     app->rectEnabled = rectEn;
     app->rectInset = rectInset;
     app->rectThick = rectThick;
+    app->useVpss = useVpss;
 
     return 0;
 }
@@ -274,6 +285,10 @@ typedef struct {
     int sensor_idx;
 } thread_arg_t;
 
+/* Forward declarations (vpss_init/deinit defined later) */
+static int get_frame(app_ctx_t *app, int sensor_idx, VIDEO_FRAME_INFO_S *vf, int timeout_ms);
+static int release_frame(app_ctx_t *app, int sensor_idx, VIDEO_FRAME_INFO_S *vf);
+
 /* Поток захвата одного сенсора (для save/free — одновременный захват) */
 static void *grab_thread(void *arg) {
     thread_arg_t *targ = (thread_arg_t *)arg;
@@ -286,9 +301,9 @@ static void *grab_thread(void *arg) {
     /* Ждём остальные потоки, чтобы вызвать GetChnFrame одновременно */
     pthread_barrier_wait(&app->barrier);
 
-    ret = RK_MPI_VI_GetChnFrame(s->pipeId, s->channelId, &stViFrame, s->timeoutMs);
+    ret = get_frame(app, targ->sensor_idx, &stViFrame, s->timeoutMs);
     if (ret != RK_SUCCESS) {
-        fprintf(stderr, "[sensor %d] RK_MPI_VI_GetChnFrame failed: %#x\n", s->devId, ret);
+        fprintf(stderr, "[sensor %d] GetChnFrame failed: %#x\n", s->devId, ret);
         s->got_frame = 0;
         return NULL;
     }
@@ -326,7 +341,7 @@ static void *grab_thread(void *arg) {
     }
 
     /* Освобождение кадра */
-    ret = RK_MPI_VI_ReleaseChnFrame(s->pipeId, s->channelId, &stViFrame);
+    ret = release_frame(app, targ->sensor_idx, &stViFrame);
     if (ret != RK_SUCCESS)
         fprintf(stderr, "[sensor %d] ReleaseChnFrame failed: %#x\n", s->devId, ret);
 
@@ -440,6 +455,118 @@ static int draw_rect(MB_BLK blk, int w, int h, int inset, int thickness, int cam
         }
     }
     return 0;
+}
+
+/*
+ * VPSS init: создать по одной группе на сенсор (passthrough, без crop).
+ * Группа i принимает кадр от VI pipe i, отдаёт через CHN0 без изменений.
+ * GetChnFrame делается из VPSS вместо VI.
+ */
+static int vpss_init(app_ctx_t *app) {
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        int grp = VPSS_GRP_BASE + i;
+        VPSS_GRP_ATTR_S gattr;
+        memset(&gattr, 0, sizeof(gattr));
+        gattr.u32MaxW = app->sensors[i].width;
+        gattr.u32MaxH = app->sensors[i].height;
+        gattr.enPixelFormat = RK_FMT_YUV420SP;
+        gattr.stFrameRate.s32SrcFrameRate = -1;
+        gattr.stFrameRate.s32DstFrameRate = -1;
+        gattr.enCompressMode = COMPRESS_MODE_NONE;
+        gattr.enVProcDev = VIDEO_PROC_DEV_VPSS;
+
+        int ret = RK_MPI_VPSS_CreateGrp(grp, &gattr);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: CreateGrp[%d] failed: %#x\n", grp, ret);
+            return -1;
+        }
+
+        VPSS_CHN_ATTR_S cattr;
+        memset(&cattr, 0, sizeof(cattr));
+        cattr.enChnMode = VPSS_CHN_MODE_USER;
+        cattr.enDynamicRange = DYNAMIC_RANGE_SDR8;
+        cattr.enPixelFormat = RK_FMT_YUV420SP;
+        cattr.stFrameRate.s32SrcFrameRate = -1;
+        cattr.stFrameRate.s32DstFrameRate = -1;
+        cattr.u32Width = app->sensors[i].width;
+        cattr.u32Height = app->sensors[i].height;
+        cattr.enCompressMode = COMPRESS_MODE_NONE;
+        cattr.u32FrameBufCnt = 2;
+        cattr.u32Depth = 1;
+
+        ret = RK_MPI_VPSS_SetChnAttr(grp, VPSS_CHN_ID, &cattr);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: SetChnAttr[%d] failed: %#x\n", grp, ret);
+            return -1;
+        }
+        ret = RK_MPI_VPSS_EnableChn(grp, VPSS_CHN_ID);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: EnableChn[%d] failed: %#x\n", grp, ret);
+            return -1;
+        }
+        ret = RK_MPI_VPSS_StartGrp(grp);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: StartGrp[%d] failed: %#x\n", grp, ret);
+            return -1;
+        }
+
+        /* Bind VI[pipeId, chnId] → VPSS[grp, 0] */
+        MPP_CHN_S vi_chn, vpss_in;
+        vi_chn.enModId = RK_ID_VI;
+        vi_chn.s32DevId = app->sensors[i].devId;
+        vi_chn.s32ChnId = app->sensors[i].channelId;
+        vpss_in.enModId = RK_ID_VPSS;
+        vpss_in.s32DevId = grp;
+        vpss_in.s32ChnId = 0;
+        ret = RK_MPI_SYS_Bind(&vi_chn, &vpss_in);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: Bind VI[%d] -> VPSS[%d] failed: %#x\n",
+                    app->sensors[i].devId, grp, ret);
+            return -1;
+        }
+        if (app->verbose)
+            printf("vpss: grp[%d] OK, VI[%d,%d] -> VPSS[%d,0] bound (%dx%d)\n",
+                    grp, app->sensors[i].devId, app->sensors[i].channelId,
+                    grp, app->sensors[i].width, app->sensors[i].height);
+    }
+    return 0;
+}
+
+static void vpss_deinit(app_ctx_t *app) {
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        int grp = VPSS_GRP_BASE + i;
+        MPP_CHN_S vi_chn, vpss_in;
+        vi_chn.enModId = RK_ID_VI;
+        vi_chn.s32DevId = app->sensors[i].devId;
+        vi_chn.s32ChnId = app->sensors[i].channelId;
+        vpss_in.enModId = RK_ID_VPSS;
+        vpss_in.s32DevId = grp;
+        vpss_in.s32ChnId = 0;
+        RK_MPI_SYS_UnBind(&vi_chn, &vpss_in);
+        RK_MPI_VPSS_DisableChn(grp, VPSS_CHN_ID);
+        RK_MPI_VPSS_StopGrp(grp);
+        RK_MPI_VPSS_DestroyGrp(grp);
+    }
+}
+
+/* GetChnFrame: из VPSS если --vpss, иначе из VI */
+static int get_frame(app_ctx_t *app, int sensor_idx, VIDEO_FRAME_INFO_S *vf, int timeout_ms) {
+    if (app->useVpss) {
+        int grp = VPSS_GRP_BASE + sensor_idx;
+        return RK_MPI_VPSS_GetChnFrame(grp, VPSS_CHN_ID, vf, timeout_ms);
+    }
+    return RK_MPI_VI_GetChnFrame(app->sensors[sensor_idx].pipeId,
+                                  app->sensors[sensor_idx].channelId,
+                                  vf, timeout_ms);
+}
+
+static int release_frame(app_ctx_t *app, int sensor_idx, VIDEO_FRAME_INFO_S *vf) {
+    if (app->useVpss) {
+        int grp = VPSS_GRP_BASE + sensor_idx;
+        return RK_MPI_VPSS_ReleaseChnFrame(grp, VPSS_CHN_ID, vf);
+    }
+    return RK_MPI_VI_ReleaseChnFrame(app->sensors[sensor_idx].pipeId,
+                                      app->sensors[sensor_idx].channelId, vf);
 }
 
 /* Инициализация VO (DSI display 720x1280, layer 1, VO_INTF_MIPI) */
@@ -627,13 +754,28 @@ int main(int argc, char **argv) {
         if (app.verbose) printf("pipe %d: StartPipe OK\n", i);
     }
 
+    /* 3b. VPSS init (only for --vpss) */
+    int vpss_inited = 0;
+    if (app.useVpss) {
+        if (vpss_init(&app) != 0) {
+            fprintf(stderr, "VPSS init failed\n");
+            goto cleanup_chn;
+        }
+        vpss_inited = 1;
+        printf("Pipeline: VI×2 → VPSS×2 (passthrough) → %s\n",
+               (app.action == ACTION_VO) ? "RGA → VO" : "save/free");
+    } else if (app.verbose) {
+        printf("Pipeline: VI×2 (direct, no VPSS) → %s\n",
+               (app.action == ACTION_VO) ? "RGA → VO" : "save/free");
+    }
+
     int vo_inited = 0;
 
     /* 4a. VO init (only for --action vo) */
     if (app.action == ACTION_VO) {
         if (vo_init(&app) != 0) {
             fprintf(stderr, "VO init failed\n");
-            goto cleanup_chn;
+            goto cleanup_vpss;
         }
         vo_inited = 1;
     }
@@ -675,9 +817,7 @@ int main(int argc, char **argv) {
             VIDEO_FRAME_INFO_S stViFrame;
             memset(&stViFrame, 0, sizeof(stViFrame));
             long long t_start = get_now_ms();
-            ret = RK_MPI_VI_GetChnFrame(app.sensors[cur_cam].pipeId,
-                                        app.sensors[cur_cam].channelId,
-                                        &stViFrame, app.sensors[cur_cam].timeoutMs);
+            ret = get_frame(&app, cur_cam, &stViFrame, app.sensors[cur_cam].timeoutMs);
             if (ret != RK_SUCCESS) {
                 fprintf(stderr, "Frame %d: cam%d GetChnFrame failed: %#x\n", frame, cur_cam, ret);
                 continue;
@@ -695,8 +835,7 @@ int main(int argc, char **argv) {
                                           app.verbose, cur_blk);
             if (ret) {
                 fprintf(stderr, "  rga_scale_rotate failed\n");
-                RK_MPI_VI_ReleaseChnFrame(app.sensors[cur_cam].pipeId,
-                                          app.sensors[cur_cam].channelId, &stViFrame);
+                release_frame(&app, cur_cam, &stViFrame);
                 continue;
             }
 
@@ -710,8 +849,7 @@ int main(int argc, char **argv) {
             send_mmz_to_vo(cur_blk, app.voDispW, app.voDispH,
                            app.voLayer, app.voChn, pts_us);
 
-            RK_MPI_VI_ReleaseChnFrame(app.sensors[cur_cam].pipeId,
-                                      app.sensors[cur_cam].channelId, &stViFrame);
+            release_frame(&app, cur_cam, &stViFrame);
 
             if (app.verbose && (saved % 30 == 0))
                 printf("Frame %d [cam%d]: %dx%d pts=%lldus grab=%lldms → VO %dx%d\n",
@@ -773,6 +911,9 @@ cleanup_vo:
         if (app.panBlk[b]) { RK_MPI_MMZ_Free(app.panBlk[b]); app.panBlk[b] = NULL; }
     }
     if (vo_inited) vo_deinit(&app);
+
+cleanup_vpss:
+    if (vpss_inited) vpss_deinit(&app);
 
 cleanup_chn:
     for (i = 0; i < NUM_SENSORS; i++)
