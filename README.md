@@ -98,6 +98,49 @@ cat /sys/kernel/debug/dri/0/state
 - Соотношение = 720/1280 = 0.5625 = 9:16 (portrait) ✓
 - Физический DPI = 720 / (68мм / 25.4) = 720 / 2.677 = 269 DPI (высокая плотность)
 
+### Команды верификации (скопировать на плату)
+
+Все характеристики можно проверить одной командой:
+```bash
+# 1. DRM connector + modes + DPMS
+cat /sys/class/drm/card0-DSI-1/status      # connected
+cat /sys/class/drm/card0-DSI-1/modes      # 720x1280
+cat /sys/class/drm/card0-DSI-1/dpms       # On
+
+# 2. Backlight
+cat /sys/class/backlight/backlight/brightness        # 200
+cat /sys/class/backlight/backlight/max_brightness    # 255
+
+# 3. DRM mode line (частота, тайминги, pixel clock)
+modetest -M rockchip -p | grep -A1 '720x1280'
+# → 720x1280 56.45 720 754 778 812 1280 1300 1303 1309 60000
+
+# 4. Plane/crtc state (кто занимает plane)
+cat /sys/kernel/debug/dri/0/state | grep -E 'plane|crtc|fb=|zpos'
+
+# 5. Device-tree timing0 (источник истины для таймингов)
+T=/proc/device-tree/dsi@22120000/panel@0/display-timings/timing0
+for f in clock-frequency hactive hfront-porch hsync-len hback-porch \
+         vactive vfront-porch vsync-len vback-porch; do
+    hex=$(od -An -tx1 $T/$f | tr -d ' \n')
+    printf "%-16s = %d\n" "$f" 0x$hex
+done
+# → clock-frequency = 60000000
+# → hactive = 720, hfront-porch = 34, hsync-len = 24, hback-porch = 34
+# → vactive = 1280, vfront-porch = 20, vsync-len = 3, vback-porch = 6
+
+# 6. Panel physical size + DSI lanes
+P=/proc/device-tree/dsi@22120000/panel@0
+for f in dsi,lanes width-mm height-mm; do
+    hex=$(od -An -tx1 $P/$f | tr -d ' \n')
+    printf "%-12s = %d\n" "$f" 0x$hex
+done
+# → dsi,lanes = 4, width-mm = 68, height-mm = 121
+
+# 7. Проверка частоты кадров (расчёт)
+python3 -c "print(60000000 / (812 * 1309))"  # → 56.4486... ≈ 56.45
+```
+
 ### Почему вертикальная склейка (NOBLEND_VER)
 
 Дисплей **портретный** (720×1280, 9:16). Две камеры GC2093 дают 1920×1080 каждая (landscape, 16:9).
