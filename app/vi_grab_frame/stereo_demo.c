@@ -20,6 +20,11 @@
  *   5. bind_init()       — VI → AVS → VPSS
  *   6. main loop         — GetChnFrame с каждого канала, сохранение в файл
  *
+ * Примечание о камерах:
+ *   Cam0 (sensor 0) — IR камера (module-name="IR", монохром, gc2093_IR_default.json)
+ *   Cam1 (sensor 1) — цветная камера (module-name="default", gc2093_default_default.json)
+ *   Cam0 будет "темнее" (Y mean~34) — это нормально, не баг калибровки.
+ *
  * Использование:
  *   # Базовый запуск (2× 1920×1080, crop на две камеры)
  *   ./stereo_demo -w 1920 -h 1080
@@ -41,7 +46,7 @@
  *   -h, --height      высота одного сенсора (обязательно)
  *   -n, --count       сколько кадров сохранить (по умолчанию 1)
  *   -s, --skip        отбросить первые N кадров (прогрев, по умолчанию 5)
- *   --iq-dir          путь к IQ-файлам (по умолчанию /oem/usr/share/iqfiles)
+ *   --iq-dir          путь к IQ-файлам (по умолчанию /etc/iqfiles)
  *   --no-camgroup     отключить camgroup (только AVS sync)
  *   --no-sync         отключить bSyncPipe (не рекомендуется)
  *   --no-ldch         отключить LDCH (коррекция дисторсии)
@@ -90,7 +95,7 @@
 #define VPSS_CHN_CAM0        0
 #define VPSS_CHN_CAM1        1
 #define VPSS_CHN_FULL        2
-#define DEFAULT_IQ_DIR       "/oem/usr/share/iqfiles"
+#define DEFAULT_IQ_DIR       "/etc/iqfiles"
 
 typedef struct {
     int width;

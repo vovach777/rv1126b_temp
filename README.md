@@ -1825,10 +1825,10 @@ gst-launch-1.0 filesrc location=1920x1080_nv12.raw ! \
 ### Файлы
 
 - `app/vi_grab_frame/vi_grab_frame.c` — один сенсор (~250 строк)
-- `app/vi_grab_frame/vi_grab_dual.c` — два сенсора одновременно (~300 строк)
+- `app/vi_grab_frame/vi_grab_dual.c` — два сенсора одновременно + --action vo (display) + --rect (~710 строк)
 - `app/vi_grab_frame/vi_grab_avs.c` — **аппаратное сшивание через AVS** (~400 строк)
 - `app/vi_grab_frame/vi_grab_avs_dma.c` — AVS → RGA → DMA буфер (zero-copy, VO/rknn ready, ~500 строк)
-- `app/vi_grab_frame/stereo_demo.c` — **полная стерео-программа**: camgroup (3A sync) + AVS + VPSS crop (~600 строк)
+- `app/vi_grab_frame/stereo_demo.c` — **полная стерео-программа**: camgroup (3A sync) + AVS + VPSS crop (~840 строк)
 - `app/vi_grab_frame/dma_alloc.c` — выделение DMA буферов через `/dev/dma_heap/` (C-перевод SDK-примера)
 - `app/vi_grab_frame/dma_alloc.h` — заголовок
 - `app/vi_grab_frame/CMakeLists.txt` — сборка всех пяти программ
@@ -3228,7 +3228,7 @@ AVS мега-кадр 3840×1080 (landscape)
 flowchart TD
     C0["Cam0 GC2093"] -->|raw| ISP0["ISP0\n(camgroup 3A sync)"]
     C1["Cam1 GC2093"] -->|raw| ISP1["ISP1\n(camgroup 3A sync)"]
-    ISP0 -->|bind| AVS["AVS_GRP\nNOBLEND_HOR\nbSyncPipe=1\nLDCH\n5088×1520"]
+    ISP0 -->|bind| AVS["AVS_GRP\nNOBLEND_HOR\nbSyncPipe=1\nLDCH\n3840×1080"]
     ISP1 -->|bind| AVS
     AVS -->|bind| VPSS["VPSS_GRP\nVIDEO_PROC_DEV_VPSS"]
 
@@ -3288,7 +3288,7 @@ AVS используется **не как панорамный сшивател
 | `-h, --height` | высота одного сенсора (обязательно) | — |
 | `-n, --count` | сколько кадров сохранить | 1 |
 | `-s, --skip` | отбросить первые N кадров (прогрев) | 5 |
-| `--iq-dir` | путь к IQ-файлам | `/oem/usr/share/iqfiles` |
+| `--iq-dir` | путь к IQ-файлам | `/etc/iqfiles` |
 | `--no-camgroup` | отключить camgroup (только AVS sync) | — |
 | `--no-sync` | отключить bSyncPipe | — |
 | `--no-ldch` | отключить LDCH | — |
@@ -3323,12 +3323,10 @@ AVS используется **не как панорамный сшивател
 - VPSS crop работает корректно: CHN0 = left half, CHN1 = right half
 - Левая половина full stitch совпадает с CHN0 (cam0)
 - Правая половина full stitch совпадает с CHN1 (cam1)
-- Cam0 темнее (mean=34) чем cam1 (mean=68) — нужна калибровка AE
+- **Cam0 — IR камера** (монохром, `module-name="IR"` в device tree, IQ файл `gc2093_IR_default.json`). Поэтому mean=34 (темнее) — это **нормально**, не баг. Cam1 — цветная камера (`gc2093_default_default.json`), mean=68. Подробнее: [Cam0=IR (grayscale)](#cam0--ir-камера-grayscale--аппаратная-особенность).
 
 **Известные проблемы:**
-- `--camgroup` (с `gc2093_IR_default.json`) даёт тёмные кадры (Y=16). Нужен правильный IQ файл.
 - `group_iq_file` и `overlap_map_file` в `rk_aiq_camgroup_instance_cfg_t` **не работают** — `camgroup_create` зависает. Удалены из stereo_demo.
-- IQ-файлы на плате в `/etc/iqfiles/` (не `/oem/usr/share/iqfiles/`). Используйте `--iq-dir /etc/iqfiles`.
 
 **Проверенные опции (на плате RV1126B):**
 
@@ -3357,7 +3355,7 @@ AVS используется **не как панорамный сшивател
 
 ![stereo_cam1](docs/images/stereo_cam1.png)
 
-> Cam0 темнее (Y mean=34) чем cam1 (Y mean=68) — нужна калибровка AE.
+> Cam0 — IR камера (монохром, `module-name="IR"`), поэтому Y mean=34. Это **нормально**, не баг калибровки.
 
 ### Сборка
 
@@ -3388,7 +3386,7 @@ make stereo_demo
 
 ### Файлы
 
-- `app/vi_grab_frame/stereo_demo.c` — исходник (~600 строк)
+- `app/vi_grab_frame/stereo_demo.c` — исходник (~840 строк)
 - `app/vi_grab_frame/CMakeLists.txt` — target `stereo_demo`
 - `build.sh` — поддержка `stereo_demo` (автодетект rkaiq headers)
 
