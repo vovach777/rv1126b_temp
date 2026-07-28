@@ -2845,16 +2845,58 @@ dma_buf_free(size, &fd, va);
 **Дисплей на плате:** DSI 720×1280 (портрет), `/dev/dri/card0`, connector `card0-DSI-1`. Управляется weston (Wayland) через DRM.
 
 **Как rkadk/rkipc выводят на дисплей:**
-- rkadk: `VI → VPSS → VO` (bind pipeline), VPSS масштабирует кадр до размера layer, VO получает уже готовый кадр через bind (не SendFrame)
-- rkipc: `VI → VO` (bind), `VO_SPLICE_MODE_RGA` — VO сам использует RGA для splice
-- Оба не используют SendFrame напрямую для стриминга — только bind pipeline
-- SendFrame в rkadk используется только на RV1106 (где нет bind)
+
+Есть **три пути** вывода кадра на DSI-дисплей в SDK:
+
+#### Путь 1: bind pipeline `VI → VO` (rkipc rv1126b_dual_ipc, наша плата)
+Используется в `app/rkipc/src/rv1126b_dual_ipc/video/video.c:2777` (`rkipc_pipe0_multi_vi_vo_init`):
+```
+VI chn (1920×1080) ──bind──→ VO layer 1, chn 0 (ROTATION_90)
+```
+- `g_vo_dev_id=0`, `g_vo_layer_id=1` (из `rkipc-dual-800w.ini`)
+- `VO_INTF_MIPI`, `VO_SPLICE_MODE_RGA`, layer `RK_FMT_RGB888`
+- `VoChnAttr.enRotation = ROTATION_90` (для MIPI портрета)
+- **`RK_MPI_SYS_Bind(VI → VO)`** — VO получает кадры автоматически
+- **AVS НЕ участвует в display path** — только для venc (запись)
+- Отдельный VI chn (`g_vi_for_vo_chn_id`) для display, отдельный для AVS/venc
+
+#### Путь 2: bind pipeline `VI → VPSS → VO` (rkadk)
+Используется в `app/rkadk/src/display/rkadk_disp.c`:
+```
+VI → VPSS (VIDEO_PROC_DEV_RGA, масштабирование) ──bind──→ VO
+```
+- VPSS масштабирует кадр до размера layer
+- `RK_MPI_SYS_Bind(VPSS → VO)` на RV1126B
+- На RV1106 — SendFrame в потоке (`RKADK_DISP_GetVpssMb`)
+
+#### Путь 3: SendFrame для UI (rkipc rv1126b_dv, rkadk_ui)
+Используется в `app/rkipc/src/rv1126b_dv/ui/rk_ui.c:469` (`rk_disp_flush`):
+```
+lvgl рендер → RGA copy area → RK_MPI_VO_SendFrame (UI layer, UI chn)
+```
+- UI на **отдельном layer/chn** (например layer 5, chn 2 — `ui_chn_id`)
+- Видео на **другом chn** того же layer (chn 0 — `video_chn_id`)
+- `VO_SPLICE_MODE_RGA` — VO микширует video + UI через RGA
+- `RK_MPI_VO_SetLayerFlush` — принудительный flush после UI update
+- Буферы: `RK_MPI_MMZ_Alloc` (cacheable), 2 буфера (double buffering)
+
+#### Путь 4: lvgl + rkadk дисп driver (lvgl_demo)
+`app/lvgl_demo/lvgl8/lv_port_disp.c` → `rkadk_disp_drv_init()` (в lv_drivers):
+- lvgl рендерит в VO через rkadk driver
+- `app/lvgl_demo/rk_demo/intercom_homepage/video_monitor/ui_monitor.c` — RTSP player через `RKADK_PLAYER_*` (видео на vo_chn=0, UI на vo_chn=1)
 
 **Почему `--action vo` в vi_grab_avs_dma не работает:**
 1. AVS использует RGA для сшивания (`stitchNonBlendProc` → `im2d_wrapper_doBlit`)
 2. VO с `VO_SPLICE_MODE_RGA` тоже хочет RGA — конфликт (`invalid job` в dmesg)
 3. `bBypassFrame` отключает RGA в VO, но тогда VO не масштабирует кадр 1920×1080 → 720×1280
-4. Решение: добавить VPSS между AVS и VO для масштабирования (как rkadk), но это меняет архитектуру
+4. **rkipc решает это разделением path**: VI chn для display (bind → VO, БЕЗ AVS) + отдельный VI chn для AVS/venc
+5. **rkadk решает через VPSS**: AVS → VPSS (scale) → VO (bind), VPSS использует RGA в pipeline режиме
+
+**Решение для vi_grab_avs_dma (не реализовано):**
+- **Вариант A (как rkipc):** добавить отдельный VI chn для display, bind → VO напрямую (мимо AVS). Но тогда на дисплей выводится только одна камера, не ститч.
+- **Вариант B (как rkadk):** добавить VPSS между AVS и VO: `AVS → VPSS (scale 720×1280) → VO (bind)`. VPSS масштабирует мега-кадр 3840×1080 → 720×1280.
+- **Вариант C (SendFrame + RGA scale):** масштабировать кадр через RGA **до** SendFrame. Но RGA занят AVS — нужно делать последовательно (AVS stitch → RGA scale → SendFrame), что замедлит pipeline.
+- **Вариант D (через weston/DRM):** отдать кадр в weston как wayland surface. Но weston использует CPU рендер (Pixman), без GPU/RGA — медленно.
 
 ### Файлы
 
