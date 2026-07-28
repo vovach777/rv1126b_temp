@@ -85,9 +85,13 @@
 #include "rk_aiq_user_api2_sysctl.h"
 #include "rk_aiq_user_api2_camgroup.h"
 
+/* RGA (2D hardware accelerator) for optional rotate 90° */
+#include "im2d.h"
+#include "rga.h"
+
 #define DEFAULT_TIMEOUT_MS   2000
 #define DEFAULT_SKIP_FRAMES  5
-#define DEFAULT_FRAME_COUNT  1
+#define DEFAULT_FRAME_COUNT 1
 #define NUM_SENSORS          2
 #define AVS_GRP_ID           0
 #define AVS_CHN_ID           0
@@ -113,6 +117,7 @@ typedef struct {
     char iqDir[256];
     char outputPrefix[64];
     int noVpss;  /* get frame directly from AVS (no VPSS) */
+    int rotate;  /* --rotate: rotate output 90° to portrait (for stereo depth) */
 } StereoCtx;
 
 static void usage(const char *prog) {
@@ -134,14 +139,18 @@ static void usage(const char *prog) {
         "  --save-cam1          save CHN1 (right camera) to cam1_XXX.raw\n"
         "  --save-full          save CHN2 (full stitch) to full_XXX.raw\n"
         "  --no-vpss            get frame directly from AVS (skip VPSS, like vi_grab_avs)\n"
+        "  --rotate             rotate output 90° to portrait (1080x1920) for stereo depth.\n"
+        "                       Cameras are portrait-mounted but sensor outputs landscape.\n"
+        "                       After rotate: horizontal baseline, horizontal disparity.\n"
         "  -o, --output <pref>  output file prefix (default: stereo)\n"
         "  -t, --timeout <ms>   GetChnFrame timeout (default: %d)\n"
         "  -v, --verbose        verbose output\n"
         "\n"
         "Examples:\n"
         "  %s -w 1920 -h 1080 --save-cam0 --save-cam1 -n 10\n"
-        "  %s -w 1920 -h 1080 --save-full -n 10\n",
-        prog, DEFAULT_IQ_DIR, DEFAULT_TIMEOUT_MS, prog, prog);
+        "  %s -w 1920 -h 1080 --save-full -n 10\n"
+        "  %s -w 1920 -h 1080 --save-cam0 --save-cam1 --rotate -n 10   # portrait 1080x1920\n",
+        prog, DEFAULT_IQ_DIR, DEFAULT_TIMEOUT_MS, prog, prog, prog);
 }
 
 static int parse_args(StereoCtx *ctx, int argc, char **argv) {
@@ -168,6 +177,7 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
         {"save-cam1",   no_argument,       0, 1008},
         {"save-full",   no_argument,       0, 1009},
         {"no-vpss",     no_argument,       0, 1011},
+        {"rotate",      no_argument,       0, 1012},
         {"output",      required_argument, 0, 'o'},
         {"timeout",     required_argument, 0, 't'},
         {"verbose",     no_argument,       0, 'v'},
@@ -193,6 +203,7 @@ static int parse_args(StereoCtx *ctx, int argc, char **argv) {
             case 1008: ctx->saveCam1 = 1; break;
             case 1009: ctx->saveFull = 1; break;
             case 1011: ctx->noVpss = 1; break;
+            case 1012: ctx->rotate = 1; break;
             case '?': usage(argv[0]); return -1;
             default:  usage(argv[0]); return -1;
         }
@@ -740,6 +751,74 @@ static void bind_deinit(StereoCtx *ctx) {
 
 /* ─── 6. save_frame — сохранение кадра в файл ─── */
 
+static rga_buffer_t pat_dummy(void) {
+    rga_buffer_t p;
+    memset(&p, 0, sizeof(p));
+    return p;
+}
+
+/*
+ * rotate_and_save — повернуть кадр на 90° через RGA, сохранить в файл.
+ * src: VPSS/AVS dmabuf (WxH NV12) → dst: malloc (HxW NV12) → fwrite.
+ * Без scale — только rotate 90°. Выход: портретная ориентация.
+ */
+static int rotate_and_save(const char *filename,
+                           VIDEO_FRAME_INFO_S *pFrame, int verbose) {
+    int src_w = pFrame->stVFrame.u32Width;
+    int src_h = pFrame->stVFrame.u32Height;
+    int dst_w = src_h;  /* rotate 90 меняет W↔H */
+    int dst_h = src_w;
+    int dst_size = dst_w * dst_h * 3 / 2;  /* NV12 */
+
+    /* Выделить выходной буфер (malloc, не DMA — просто для fwrite) */
+    void *dst_buf = malloc(dst_size);
+    if (!dst_buf) {
+        fprintf(stderr, "rotate: malloc %d failed\n", dst_size);
+        return -1;
+    }
+
+    /* wrapbuffer_virtual — обернуть malloc-указатель в rga_buffer_t */
+    rga_buffer_t src = wrapbuffer_fd_t(RK_MPI_MB_Handle2Fd(pFrame->stVFrame.pMbBlk),
+                                       src_w, src_h, src_w, src_h,
+                                       RK_FORMAT_YCbCr_420_SP);
+    rga_buffer_t dst = wrapbuffer_virtualaddr_t(dst_buf, dst_w, dst_h,
+                                                  dst_w, dst_h,
+                                                  RK_FORMAT_YCbCr_420_SP);
+    if (src.width <= 0 || dst.width <= 0) {
+        fprintf(stderr, "rotate: wrapbuffer failed (src.w=%d dst.w=%d)\n",
+                src.width, dst.width);
+        free(dst_buf);
+        return -1;
+    }
+
+    im_rect srect = { .width = src_w, .height = src_h };
+    im_rect drect = { .width = dst_w, .height = dst_h };
+    im_rect prect = {0};
+    int usage = IM_HAL_TRANSFORM_ROT_90 | IM_SYNC;
+
+    IM_STATUS st = improcess(src, dst, pat_dummy(), srect, drect, prect, usage);
+    if (st != IM_STATUS_SUCCESS) {
+        fprintf(stderr, "rotate: improcess failed: %d (%dx%d → %dx%d rot=90)\n",
+                (int)st, src_w, src_h, dst_w, dst_h);
+        free(dst_buf);
+        return -1;
+    }
+
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        fprintf(stderr, "rotate: cannot open %s\n", filename);
+        free(dst_buf);
+        return -1;
+    }
+    fwrite(dst_buf, 1, dst_size, fp);
+    fclose(fp);
+    free(dst_buf);
+
+    if (verbose) printf("rotate+save: %s (%dx%d → %dx%d rot=90, %d bytes)\n",
+                        filename, src_w, src_h, dst_w, dst_h, dst_size);
+    return 0;
+}
+
 static int save_frame_to_file(const char *filename,
                               VIDEO_FRAME_INFO_S *pFrame, int verbose) {
     FILE *fp = fopen(filename, "wb");
@@ -850,10 +929,18 @@ int main(int argc, char **argv) {
             }
 
             char filename[256];
-            snprintf(filename, sizeof(filename), "%s_mega_%05d_%dx%d.raw",
-                     ctx.outputPrefix, saved,
-                     stFrame.stVFrame.u32Width, stFrame.stVFrame.u32Height);
-            save_frame_to_file(filename, &stFrame, ctx.verbose);
+            if (ctx.rotate) {
+                int rw = stFrame.stVFrame.u32Height;
+                int rh = stFrame.stVFrame.u32Width;
+                snprintf(filename, sizeof(filename), "%s_mega_%05d_%dx%d.raw",
+                         ctx.outputPrefix, saved, rw, rh);
+                rotate_and_save(filename, &stFrame, ctx.verbose);
+            } else {
+                snprintf(filename, sizeof(filename), "%s_mega_%05d_%dx%d.raw",
+                         ctx.outputPrefix, saved,
+                         stFrame.stVFrame.u32Width, stFrame.stVFrame.u32Height);
+                save_frame_to_file(filename, &stFrame, ctx.verbose);
+            }
             saved++;
 
             RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stFrame);
@@ -906,24 +993,48 @@ int main(int argc, char **argv) {
 
             char filename[256];
             if (ctx.saveCam0 && stCam0.stVFrame.pMbBlk) {
-                snprintf(filename, sizeof(filename), "%s_cam0_%05d_%dx%d.raw",
-                         ctx.outputPrefix, saved,
-                         stCam0.stVFrame.u32Width, stCam0.stVFrame.u32Height);
-                save_frame_to_file(filename, &stCam0, ctx.verbose);
+                if (ctx.rotate) {
+                    int rw = stCam0.stVFrame.u32Height;
+                    int rh = stCam0.stVFrame.u32Width;
+                    snprintf(filename, sizeof(filename), "%s_cam0_%05d_%dx%d.raw",
+                             ctx.outputPrefix, saved, rw, rh);
+                    rotate_and_save(filename, &stCam0, ctx.verbose);
+                } else {
+                    snprintf(filename, sizeof(filename), "%s_cam0_%05d_%dx%d.raw",
+                             ctx.outputPrefix, saved,
+                             stCam0.stVFrame.u32Width, stCam0.stVFrame.u32Height);
+                    save_frame_to_file(filename, &stCam0, ctx.verbose);
+                }
                 RK_MPI_VPSS_ReleaseChnFrame(VPSS_GRP_ID, VPSS_CHN_CAM0, &stCam0);
             }
             if (ctx.saveCam1 && stCam1.stVFrame.pMbBlk) {
-                snprintf(filename, sizeof(filename), "%s_cam1_%05d_%dx%d.raw",
-                         ctx.outputPrefix, saved,
-                         stCam1.stVFrame.u32Width, stCam1.stVFrame.u32Height);
-                save_frame_to_file(filename, &stCam1, ctx.verbose);
+                if (ctx.rotate) {
+                    int rw = stCam1.stVFrame.u32Height;
+                    int rh = stCam1.stVFrame.u32Width;
+                    snprintf(filename, sizeof(filename), "%s_cam1_%05d_%dx%d.raw",
+                             ctx.outputPrefix, saved, rw, rh);
+                    rotate_and_save(filename, &stCam1, ctx.verbose);
+                } else {
+                    snprintf(filename, sizeof(filename), "%s_cam1_%05d_%dx%d.raw",
+                             ctx.outputPrefix, saved,
+                             stCam1.stVFrame.u32Width, stCam1.stVFrame.u32Height);
+                    save_frame_to_file(filename, &stCam1, ctx.verbose);
+                }
                 RK_MPI_VPSS_ReleaseChnFrame(VPSS_GRP_ID, VPSS_CHN_CAM1, &stCam1);
             }
             if (ctx.saveFull && stFull.stVFrame.pMbBlk) {
-                snprintf(filename, sizeof(filename), "%s_full_%05d_%dx%d.raw",
-                         ctx.outputPrefix, saved,
-                         stFull.stVFrame.u32Width, stFull.stVFrame.u32Height);
-                save_frame_to_file(filename, &stFull, ctx.verbose);
+                if (ctx.rotate) {
+                    int rw = stFull.stVFrame.u32Height;
+                    int rh = stFull.stVFrame.u32Width;
+                    snprintf(filename, sizeof(filename), "%s_full_%05d_%dx%d.raw",
+                             ctx.outputPrefix, saved, rw, rh);
+                    rotate_and_save(filename, &stFull, ctx.verbose);
+                } else {
+                    snprintf(filename, sizeof(filename), "%s_full_%05d_%dx%d.raw",
+                             ctx.outputPrefix, saved,
+                             stFull.stVFrame.u32Width, stFull.stVFrame.u32Height);
+                    save_frame_to_file(filename, &stFull, ctx.verbose);
+                }
                 RK_MPI_VPSS_ReleaseChnFrame(VPSS_GRP_ID, VPSS_CHN_FULL, &stFull);
             }
             saved++;
