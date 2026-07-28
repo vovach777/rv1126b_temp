@@ -59,6 +59,7 @@
 #include "rk_mpi_vo.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_cal.h"
+#include "rk_mpi_mmz.h"
 
 /* RGA (2D hardware accelerator) for split/rotate */
 #include "im2d.h"
@@ -100,6 +101,9 @@ typedef struct {
     int voChn;
     int voDispW;    /* display width (from VO driver, for pan-and-scan) */
     int voDispH;    /* display height (from VO driver, for pan-and-scan) */
+    MB_BLK panBlk[2]; /* double-buffered MMZ for pan-and-scan (VO holds one, we fill other) */
+    int panIdx;     /* current buffer index (0 or 1) */
+    int panBufSize; /* size of each panBlk buffer */
 } app_ctx_t;
 
 static void usage(const char *prog) {
@@ -186,7 +190,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     ctx->calibFile[0] = '\0';
     ctx->action = ACTION_SAVE;
     ctx->voDevId = 0;
-    ctx->voLayer = 1;
+    ctx->voLayer = 1;  /* layer 1 = Smart/UI (rkipc uses it, works with weston) */
     ctx->voChn = 0;
     ctx->voDispW = 720;
     ctx->voDispH = 1280;
@@ -360,13 +364,12 @@ static int rga_split_to_dma(MB_BLK mb, int mega_w, int mega_h,
  * frame_idx — номер кадра (для синусоиды), mega_w/h — размер мега-кадра.
  * Возвращает 0 при успехе. Заполняет out_fd, out_va, out_w, out_h.
  */
-static int rga_pan_to_dma(MB_BLK mb, int mega_w, int mega_h,
+static int rga_pan_to_mmz(MB_BLK mb, int mega_w, int mega_h,
                           int crop_w, int crop_h, int dst_w, int dst_h,
                           int frame_idx, int verbose,
-                          int *out_fd, void **out_va,
+                          MB_BLK dst_blk,
                           int *out_w, int *out_h) {
     /* Синусоиды: окно плавно гуляет по панораме туда-обратно */
-    /* X: 0 .. (mega_w - crop_w), Y: 0 .. (mega_h - crop_h) */
     float t = (float)frame_idx;
     float sx = sinf(t * 0.04f) * 0.5f + 0.5f;       /* медленно по X */
     float sy = sinf(t * 0.06f + 1.7f) * 0.5f + 0.5f; /* медленно по Y, сдвиг фазы */
@@ -374,27 +377,20 @@ static int rga_pan_to_dma(MB_BLK mb, int mega_w, int mega_h,
     int max_y = mega_h - crop_h;
     if (max_x < 0) max_x = 0;
     if (max_y < 0) max_y = 0;
-    int crop_x = (int)(sx * max_x);
-    int crop_y = (int)(sy * max_y);
-
-    int osize = dst_w * dst_h * 3 / 2;  /* NV12 */
-    int rc = dma_buf_alloc(DMA_HEAP_UNCACHE_PATH, osize, out_fd, out_va);
-    if (rc < 0) {
-        fprintf(stderr, "[rga] pan: dma_buf_alloc failed\n");
-        return -1;
-    }
+    int crop_x = (int)(sx * max_x) & ~1;  /* NV12: even alignment (UV plane) */
+    int crop_y = (int)(sy * max_y) & ~1;
 
     int src_fd = RK_MPI_MB_Handle2Fd(mb);
-    if (src_fd < 0) {
-        fprintf(stderr, "[rga] pan: Handle2Fd failed\n");
-        dma_buf_free(osize, out_fd, *out_va);
+    int dst_fd = RK_MPI_MB_Handle2Fd(dst_blk);
+    if (src_fd < 0 || dst_fd < 0) {
+        fprintf(stderr, "[rga] pan: Handle2Fd failed (src=%d dst=%d)\n", src_fd, dst_fd);
         return -1;
     }
 
     rga_buffer_t src = wrapbuffer_fd_t(src_fd, mega_w, mega_h,
                                        mega_w, mega_h, RK_FORMAT_YCbCr_420_SP);
-    rga_buffer_t dst = wrapbuffer_fd_t(*out_fd, dst_w, dst_h, dst_w, dst_h,
-                                       RK_FORMAT_YCbCr_420_SP);
+    rga_buffer_t dst = wrapbuffer_fd_t(dst_fd, dst_w, dst_h, dst_w, dst_h,
+                                       RK_FORMAT_BGRA_8888);
 
     im_rect srect = { .x = crop_x, .y = crop_y, .width = crop_w, .height = crop_h };
     im_rect drect = { .width = dst_w, .height = dst_h };
@@ -402,13 +398,16 @@ static int rga_pan_to_dma(MB_BLK mb, int mega_w, int mega_h,
 
     /* crop + rotate 90 + scale (если crop ≠ dst) в одной операции */
     int usage = IM_HAL_TRANSFORM_ROT_90 | IM_SYNC;
+    /* TEST: skip RGA convert to check grab time */
+#if 1
     IM_STATUS st = improcess(src, dst, pat_dummy(), srect, drect, prect, usage);
     if (st != IM_STATUS_SUCCESS) {
         fprintf(stderr, "[rga] pan: improcess failed: %d (crop=[%d,%d,%d,%d] → %dx%d rot=90)\n",
                 (int)st, crop_x, crop_y, crop_w, crop_h, dst_w, dst_h);
-        dma_buf_free(osize, out_fd, *out_va);
         return -1;
     }
+    /* No flush needed — non-cacheable MMZ buffer */
+#endif
 
     if (verbose && (frame_idx % 30 == 0))
         printf("  [rga] pan: crop=[%d,%d,%d,%d] → %dx%d rot=90 (sin x=%.2f y=%.2f)\n",
@@ -433,43 +432,24 @@ static int save_dma_to_file(void *va, int size, const char *prefix,
 }
 
 /*
- * Отправить DMA буфер в VO (дисплей) — zero-copy.
- * Создаёт MB_BLK из внешнего dmabuf fd через RK_MPI_SYS_CreateMB.
+ * Отправить MMZ буфер в VO (дисплей) — rockit-managed buffer.
+ * VO splice RGA can access MMZ buffer (like rk_ui.c SendFrame).
  */
-static int send_dma_to_vo(int dmabuf_fd, void *va, int w, int h,
+static int send_mmz_to_vo(MB_BLK blk, int w, int h,
                           int vo_layer, int vo_chn, long long pts) {
-    MB_EXT_CONFIG_S ext_cfg;
-    memset(&ext_cfg, 0, sizeof(ext_cfg));
-    ext_cfg.s32Fd      = dmabuf_fd;
-    ext_cfg.pu8VirAddr = (RK_U8 *)va;
-    ext_cfg.u64PhyAddr = 0;  /* rockit получит физ. адрес из dmabuf fd */
-    ext_cfg.u64Size    = (RK_U64)(w * h * 3 / 2);
-    ext_cfg.pFreeCB    = NULL;
-    ext_cfg.pOpaque    = NULL;
-
-    MB_BLK mb = NULL;
-    RK_S32 ret = RK_MPI_SYS_CreateMB(&mb, &ext_cfg);
-    if (ret != RK_SUCCESS) {
-        fprintf(stderr, "[vo] cam: RK_MPI_SYS_CreateMB failed: %#x\n", ret);
-        return -1;
-    }
-
     VIDEO_FRAME_INFO_S vf;
     memset(&vf, 0, sizeof(vf));
-    vf.stVFrame.pMbBlk        = mb;
+    vf.stVFrame.pMbBlk        = blk;
     vf.stVFrame.u32Width      = w;
     vf.stVFrame.u32Height     = h;
     vf.stVFrame.u32VirWidth   = w;
     vf.stVFrame.u32VirHeight  = h;
-    vf.stVFrame.enPixelFormat = RK_FMT_YUV420SP;
+    vf.stVFrame.enPixelFormat = RK_FMT_BGRA8888;  /* BGRA8888 — matches layer */
     vf.stVFrame.u64PTS        = pts;
 
-    ret = RK_MPI_VO_SendFrame(vo_layer, vo_chn, &vf, 0);
+    RK_S32 ret = RK_MPI_VO_SendFrame(vo_layer, vo_chn, &vf, 1000);  /* wait up to 1s */
     if (ret != RK_SUCCESS)
         fprintf(stderr, "[vo] cam: VO_SendFrame failed: %#x\n", ret);
-
-    /* MB_EXT не освобождает dmabuf — мы управляем им сами */
-    RK_MPI_SYS_Free(mb);
     return (ret == RK_SUCCESS) ? 0 : -1;
 }
 
@@ -704,7 +684,7 @@ int main(int argc, char **argv) {
         VoPubAttr.enIntfType = VO_INTF_MIPI;
         VoPubAttr.enIntfSync = VO_OUTPUT_DEFAULT;
 
-        /* Sequence matches rkadk RKADK_MPI_VO_CreateLayDev */
+        /* Init order: BindLayer first, then SetPubAttr/Enable (old order — avoids RGA conflicts) */
         ret = RK_MPI_VO_BindLayer(ctx.voLayer, ctx.voDevId, VO_LAYER_MODE_GRAPHIC);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_BindLayer: %#x\n", ret); goto cleanup_bind; }
         ret = RK_MPI_VO_SetPubAttr(ctx.voDevId, &VoPubAttr);
@@ -712,7 +692,7 @@ int main(int argc, char **argv) {
         ret = RK_MPI_VO_Enable(ctx.voDevId);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_Enable: %#x\n", ret); goto cleanup_bind; }
 
-        /* Get real display dimensions from driver (like rkadk does) */
+        /* Get real display dimensions from driver */
         ret = RK_MPI_VO_GetPubAttr(ctx.voDevId, &VoPubAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_GetPubAttr: %#x\n", ret); goto cleanup_vo_dev; }
         if (VoPubAttr.stSyncInfo.u16Hact == 0 || VoPubAttr.stSyncInfo.u16Vact == 0) {
@@ -725,7 +705,6 @@ int main(int argc, char **argv) {
         ctx.voDispH = disp_h;
         if (ctx.verbose) printf("VO: display %dx%d (from driver)\n", disp_w, disp_h);
 
-        /* In bypass mode, layer image size must match frame size (no scaling) */
         stLayerAttr.stDispRect.s32X = 0;
         stLayerAttr.stDispRect.s32Y = 0;
         stLayerAttr.stDispRect.u32Width = disp_w;
@@ -733,7 +712,8 @@ int main(int argc, char **argv) {
         stLayerAttr.stImageSize.u32Width = disp_w;
         stLayerAttr.stImageSize.u32Height = disp_h;
         stLayerAttr.u32DispFrmRt = 30;
-        stLayerAttr.enPixFormat = RK_FMT_YUV420SP;
+        /* BGRA8888: our RGA converts NV12→BGRA8888, bypass passes MMZ to DSI */
+        stLayerAttr.enPixFormat = RK_FMT_BGRA8888;
         VideoCSC.enCscMatrix = VO_CSC_MATRIX_IDENTITY;
         VideoCSC.u32Contrast = 50;
         VideoCSC.u32Hue = 50;
@@ -742,7 +722,9 @@ int main(int argc, char **argv) {
 
         ret = RK_MPI_VO_SetLayerAttr(ctx.voLayer, &stLayerAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerAttr: %#x\n", ret); goto cleanup_vo_dev; }
-        /* Bypass mode — VO не использует RGA (AVS уже использует RGA, конфликт) */
+        /* Bypass mode: MMZ buffer (rockit-managed) passed directly to DSI.
+           No splice RGA — avoids conflict with AVS stitch RGA.
+           Our RGA already converted NV12→BGRA8888, bypass outputs directly. */
         stLayerAttr.bBypassFrame = RK_TRUE;
         ret = RK_MPI_VO_SetLayerAttr(ctx.voLayer, &stLayerAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerAttr bypass: %#x\n", ret); goto cleanup_vo_dev; }
@@ -803,27 +785,39 @@ int main(int argc, char **argv) {
 
         if (ctx.action == ACTION_VO) {
             /* Pan-and-scan: crop окно из мега-кадра по синусоиде, rotate 90 → дисплей */
-            int pan_fd = -1;
-            void *pan_va = NULL;
             int pan_w, pan_h;
             /* crop 1280×720 (landscape) из мега, rotate 90 → 720×1280 (портрет) */
             int crop_w = 1280, crop_h = 720;
             if (crop_w > w) crop_w = w;
             if (crop_h > h) crop_h = h;
-            ret = rga_pan_to_dma(stMegaFrame.stVFrame.pMbBlk,
+            /* Allocate double-buffered MMZ (VO holds one buffer, we fill the other) */
+            if (ctx.panBlk[0] == NULL) {
+                int psize = ctx.voDispW * ctx.voDispH * 4;  /* BGRA8888 */
+                for (int b = 0; b < 2; b++) {
+                    RK_S32 rc = RK_MPI_MMZ_Alloc(&ctx.panBlk[b], psize, 0);  /* non-cacheable */
+                    if (rc != RK_SUCCESS) {
+                        fprintf(stderr, "  MMZ_Alloc pan[%d] failed: %#x\n", b, rc);
+                        RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+                        goto cleanup_bind;
+                    }
+                }
+                ctx.panBufSize = psize;
+                ctx.panIdx = 0;
+            }
+            MB_BLK cur_blk = ctx.panBlk[ctx.panIdx];
+            ctx.panIdx ^= 1;  /* swap for next frame */
+            ret = rga_pan_to_mmz(stMegaFrame.stVFrame.pMbBlk,
                                  w, h, crop_w, crop_h,
                                  ctx.voDispW, ctx.voDispH,
                                  frame, ctx.verbose,
-                                 &pan_fd, &pan_va, &pan_w, &pan_h);
+                                 cur_blk, &pan_w, &pan_h);
             if (ret) {
-                fprintf(stderr, "  rga_pan_to_dma failed\n");
+                fprintf(stderr, "  rga_pan_to_mmz failed\n");
                 RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
                 continue;
             }
-            osize = pan_w * pan_h * 3 / 2;
-            send_dma_to_vo(pan_fd, pan_va, pan_w, pan_h,
+            send_mmz_to_vo(cur_blk, pan_w, pan_h,
                            ctx.voLayer, ctx.voChn, pts_us);
-            dma_buf_free(osize, &pan_fd, pan_va);
         } else {
             /* save/free: split на 2 половинки (как раньше) */
             int out_fds[2] = {-1, -1};
@@ -864,6 +858,9 @@ int main(int argc, char **argv) {
            ctx.skipFrames, saved, ctx.frameCount, action_str);
 
 cleanup_bind:
+    for (int b = 0; b < 2; b++) {
+        if (ctx.panBlk[b]) { RK_MPI_MMZ_Free(ctx.panBlk[b]); ctx.panBlk[b] = NULL; }
+    }
     for (i = 0; i < NUM_SENSORS; i++) {
         MPP_CHN_S vi_chn, avs_in_chn;
         vi_chn.enModId = RK_ID_VI; vi_chn.s32DevId = i; vi_chn.s32ChnId = ctx.channelId;
