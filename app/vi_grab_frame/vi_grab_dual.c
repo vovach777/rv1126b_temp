@@ -70,6 +70,8 @@
 #define DEFAULT_CHANNEL_ID  0
 #define DEFAULT_FRAME_COUNT 1
 #define NUM_SENSORS         2
+#define DEFAULT_RECT_INSET  50
+#define DEFAULT_RECT_THICK  4
 
 /* Что делать с кадром */
 typedef enum {
@@ -115,6 +117,7 @@ typedef struct {
     int panBufSize;
     int rectEnabled;      /* --rect: рисовать рамку цвета камеры */
     int rectInset;        /* отступ рамки от края (по умолчанию 50) */
+    int rectThick;        /* толщина рамки (по умолчанию 4) */
 } app_ctx_t;
 
 static volatile int g_exit = 0;
@@ -145,7 +148,8 @@ static void usage(const char *prog) {
         "  --vo-chn <N>            VO channel for vo (default: 0)\n"
         "  --switch-interval <S>   seconds between camera switch in vo (default: 1)\n"
         "  --rect                  draw colored border rect (cam0=green, cam1=red)\n"
-        "  --rect-inset <N>        rect inset from edge in px (default: 50)\n"
+        "  --rect-inset <N>        rect inset from edge in px (default: %d)\n"
+        "  --rect-thick <N>        rect border thickness in px (default: %d)\n"
         "  --help                  show this help\n"
         "\n"
         "Examples:\n"
@@ -154,6 +158,7 @@ static void usage(const char *prog) {
         "  %s -w 1920 -h 1080 --action vo --vo-dev 0 --vo-layer 1 --vo-chn 0 -n 1800\n"
         "  %s -w 1920 -h 1080 --action free -n 100\n",
         prog, DEFAULT_CHANNEL_ID, DEFAULT_FRAME_COUNT, DEFAULT_TIMEOUT_MS,
+        DEFAULT_RECT_INSET, DEFAULT_RECT_THICK,
         prog, prog, prog, prog);
 }
 
@@ -175,6 +180,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
         {"switch-interval", required_argument, 0, 1005},
         {"rect",            no_argument,       0, 1006},
         {"rect-inset",      required_argument, 0, 1007},
+        {"rect-thick",      required_argument, 0, 1008},
         {"help",            no_argument,       0, '?'},
         {0, 0, 0, 0}
     };
@@ -188,7 +194,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     action_t action = ACTION_SAVE;
     int voDev = 0, voLayer = 1, voChn = 0;
     int switchInt = 1;
-    int rectEn = 0, rectInset = 50;
+    int rectEn = 0, rectInset = DEFAULT_RECT_INSET, rectThick = DEFAULT_RECT_THICK;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "w:h:W:H:c:o:n:t:v", long_opts, NULL)) != -1) {
@@ -213,6 +219,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
             case 1005: switchInt = atoi(optarg); break;
             case 1006: rectEn = 1; break;
             case 1007: rectInset = atoi(optarg); break;
+            case 1008: rectThick = atoi(optarg); break;
             case '?':
             default:
                 usage(argv[0]);
@@ -250,6 +257,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     app->switchInterval = switchInt;
     app->rectEnabled = rectEn;
     app->rectInset = rectInset;
+    app->rectThick = rectThick;
 
     return 0;
 }
@@ -394,11 +402,11 @@ static int send_mmz_to_vo(MB_BLK blk, int w, int h,
 /*
  * draw_rect — нарисовать рамку через RGA (hardware, без CPU).
  * cam_idx=0 → зелёный, cam_idx=1 → красный.
- * Рамка толщиной 4 пикселя, отступ inset от края.
+ * Рамка толщиной thickness пикселей, отступ inset от края.
  * Использует imfill_t (C API) — 4 заполненных прямоугольника (стороны рамки).
- * Цвет в формате 0x00RRGGBB (imfill_t для BGRA8888).
+ * Цвет в формате 0xAABBGGRR (imfill_t для BGRA8888).
  */
-static int draw_rect(MB_BLK blk, int w, int h, int inset, int cam_idx) {
+static int draw_rect(MB_BLK blk, int w, int h, int inset, int thickness, int cam_idx) {
     int dst_fd = RK_MPI_MB_Handle2Fd(blk);
     if (dst_fd < 0) {
         fprintf(stderr, "[rect] Handle2Fd failed\n");
@@ -406,7 +414,7 @@ static int draw_rect(MB_BLK blk, int w, int h, int inset, int cam_idx) {
     }
     rga_buffer_t dst = wrapbuffer_fd_t(dst_fd, w, h, w, h, RK_FORMAT_BGRA_8888);
 
-    int thickness = 4;
+    if (thickness < 1) thickness = 1;
     int x0 = inset, y0 = inset;
     int rw = w - inset * 2, rh = h - inset * 2;
     if (rw < thickness * 2 || rh < thickness * 2) return -1;
@@ -695,7 +703,7 @@ int main(int argc, char **argv) {
             /* Опциональная рамка цвета камеры (--rect) */
             if (app.rectEnabled) {
                 draw_rect(cur_blk, app.voDispW, app.voDispH,
-                          app.rectInset, cur_cam);
+                          app.rectInset, app.rectThick, cur_cam);
             }
 
             /* Отправить в VO */
