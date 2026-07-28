@@ -113,6 +113,8 @@ typedef struct {
     MB_BLK panBlk[2];     /* double-buffered MMZ for VO */
     int panIdx;
     int panBufSize;
+    int rectEnabled;      /* --rect: рисовать рамку цвета камеры */
+    int rectInset;        /* отступ рамки от края (по умолчанию 50) */
 } app_ctx_t;
 
 static volatile int g_exit = 0;
@@ -142,6 +144,8 @@ static void usage(const char *prog) {
         "  --vo-layer <N>          VO layer for vo (default: 1)\n"
         "  --vo-chn <N>            VO channel for vo (default: 0)\n"
         "  --switch-interval <S>   seconds between camera switch in vo (default: 1)\n"
+        "  --rect                  draw colored border rect (cam0=green, cam1=red)\n"
+        "  --rect-inset <N>        rect inset from edge in px (default: 50)\n"
         "  --help                  show this help\n"
         "\n"
         "Examples:\n"
@@ -169,6 +173,8 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
         {"vo-layer",        required_argument, 0, 1003},
         {"vo-chn",          required_argument, 0, 1004},
         {"switch-interval", required_argument, 0, 1005},
+        {"rect",            no_argument,       0, 1006},
+        {"rect-inset",      required_argument, 0, 1007},
         {"help",            no_argument,       0, '?'},
         {0, 0, 0, 0}
     };
@@ -182,6 +188,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     action_t action = ACTION_SAVE;
     int voDev = 0, voLayer = 1, voChn = 0;
     int switchInt = 1;
+    int rectEn = 0, rectInset = 50;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "w:h:W:H:c:o:n:t:v", long_opts, NULL)) != -1) {
@@ -204,6 +211,8 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
             case 1003: voLayer = atoi(optarg); break;
             case 1004: voChn = atoi(optarg); break;
             case 1005: switchInt = atoi(optarg); break;
+            case 1006: rectEn = 1; break;
+            case 1007: rectInset = atoi(optarg); break;
             case '?':
             default:
                 usage(argv[0]);
@@ -239,6 +248,8 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     app->voLayer = voLayer;
     app->voChn = voChn;
     app->switchInterval = switchInt;
+    app->rectEnabled = rectEn;
+    app->rectInset = rectInset;
 
     return 0;
 }
@@ -376,6 +387,49 @@ static int send_mmz_to_vo(MB_BLK blk, int w, int h,
     if (ret != RK_SUCCESS) {
         fprintf(stderr, "[vo] VO_SendFrame failed: %#x\n", ret);
         return -1;
+    }
+    return 0;
+}
+
+/*
+ * draw_rect — нарисовать рамку через RGA (hardware, без CPU).
+ * cam_idx=0 → зелёный, cam_idx=1 → красный.
+ * Рамка толщиной 4 пикселя, отступ inset от края.
+ * Использует imfill_t (C API) — 4 заполненных прямоугольника (стороны рамки).
+ * Цвет в формате 0x00RRGGBB (imfill_t для BGRA8888).
+ */
+static int draw_rect(MB_BLK blk, int w, int h, int inset, int cam_idx) {
+    int dst_fd = RK_MPI_MB_Handle2Fd(blk);
+    if (dst_fd < 0) {
+        fprintf(stderr, "[rect] Handle2Fd failed\n");
+        return -1;
+    }
+    rga_buffer_t dst = wrapbuffer_fd_t(dst_fd, w, h, w, h, RK_FORMAT_BGRA_8888);
+
+    int thickness = 4;
+    int x0 = inset, y0 = inset;
+    int rw = w - inset * 2, rh = h - inset * 2;
+    if (rw < thickness * 2 || rh < thickness * 2) return -1;
+
+    /* Для BGRA8888: пробуем 0xAABBGGRR (alpha в старшем байте).
+     * cam0=green: A=255,B=0,G=255,R=0 → 0xFF00FF00
+     * cam1=red:   A=255,B=0,G=0,R=255 → 0xFF0000FF */
+    uint32_t color = (cam_idx == 0) ? 0xFF00FF00 : 0xFF0000FF;
+
+    /* 4 стороны рамки как заполненные прямоугольники */
+    im_rect sides[4] = {
+        { x0, y0, rw, thickness },                          /* top */
+        { x0, y0 + rh - thickness, rw, thickness },        /* bottom */
+        { x0, y0, thickness, rh },                        /* left */
+        { x0 + rw - thickness, y0, thickness, rh },       /* right */
+    };
+
+    for (int i = 0; i < 4; i++) {
+        IM_STATUS st = imfill_t(dst, sides[i], (int)color, 1);
+        if (st != IM_STATUS_SUCCESS) {
+            fprintf(stderr, "[rect] imfill_t[%d] failed: %d\n", i, (int)st);
+            return -1;
+        }
     }
     return 0;
 }
@@ -636,6 +690,12 @@ int main(int argc, char **argv) {
                 RK_MPI_VI_ReleaseChnFrame(app.sensors[cur_cam].pipeId,
                                           app.sensors[cur_cam].channelId, &stViFrame);
                 continue;
+            }
+
+            /* Опциональная рамка цвета камеры (--rect) */
+            if (app.rectEnabled) {
+                draw_rect(cur_blk, app.voDispW, app.voDispH,
+                          app.rectInset, cur_cam);
             }
 
             /* Отправить в VO */
