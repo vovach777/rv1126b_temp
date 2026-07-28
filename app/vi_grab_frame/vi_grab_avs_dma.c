@@ -722,10 +722,9 @@ int main(int argc, char **argv) {
 
         ret = RK_MPI_VO_SetLayerAttr(ctx.voLayer, &stLayerAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerAttr: %#x\n", ret); goto cleanup_vo_dev; }
-        /* Bypass mode: MMZ buffer (rockit-managed) passed directly to DSI.
-           No splice RGA — avoids conflict with AVS stitch RGA.
-           Our RGA already converted NV12→BGRA8888, bypass outputs directly. */
-        stLayerAttr.bBypassFrame = RK_TRUE;
+        /* Splice mode (not bypass): VO uses RGA to composite frame to DSI.
+           Bypass mode gives black screen without weston (DRM master issue). */
+        stLayerAttr.bBypassFrame = RK_FALSE;
         ret = RK_MPI_VO_SetLayerAttr(ctx.voLayer, &stLayerAttr);
         if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetLayerAttr bypass: %#x\n", ret); goto cleanup_vo_dev; }
         ret = RK_MPI_VO_EnableLayer(ctx.voLayer);
@@ -760,6 +759,8 @@ int main(int argc, char **argv) {
         VIDEO_FRAME_INFO_S stMegaFrame;
         memset(&stMegaFrame, 0, sizeof(stMegaFrame));
 
+        static long long t_prev_start = 0;
+        static long long t_prev_pts = 0;
         long long t_start = get_now_ms();
         ret = RK_MPI_AVS_GetChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame, ctx.timeoutMs);
         if (ret != RK_SUCCESS) {
@@ -770,6 +771,10 @@ int main(int argc, char **argv) {
         int w = stMegaFrame.stVFrame.u32Width;
         int h = stMegaFrame.stVFrame.u32Height;
         long long pts_us = (long long)stMegaFrame.stVFrame.u64PTS;
+        long long wall_delta = t_prev_start ? (t_start - t_prev_start) : 0;
+        long long pts_delta = t_prev_pts ? (pts_us - t_prev_pts) : 0;
+        t_prev_start = t_start;
+        t_prev_pts = pts_us;
 
         if (frame < ctx.skipFrames) {
             if (ctx.verbose) printf("Frame %d [skip]: pts=%lldus grab=%lldms\n", frame, pts_us, t_grab);
@@ -777,8 +782,8 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        printf("Frame %d [proc]: %dx%d pts=%lldus grab=%lldms → RGA → DMA → %s\n",
-               frame, w, h, pts_us, t_grab, action_str);
+        printf("Frame %d [proc]: %dx%d pts=%lldus grab=%lldms wall_delta=%lldms pts_delta=%lldms → %s\n",
+               frame, w, h, pts_us, t_grab, wall_delta, pts_delta/1000, action_str);
 
         int osize;
         long long t_act_start = get_now_ms();
@@ -852,6 +857,9 @@ int main(int argc, char **argv) {
         }
 
         RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+        long long t_act = get_now_ms() - t_act_start;
+        if (ctx.verbose && (saved % 10 == 0))
+            printf("  [act] frame %d: act=%lldms (rga+vo/save)\n", frame, t_act);
         saved++;
     }
     printf("Done: skipped=%d, processed=%d/%d (action=%s)\n",
