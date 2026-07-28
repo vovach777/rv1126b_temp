@@ -2793,7 +2793,7 @@ VI dev0/1 → VI pipe0/1 → AVS grp0 → AVS chn0 (мега-кадр 3840×1080
 # → cam0_1920x1080_pts123_nv12.raw
 # → cam1_1920x1080_pts123_nv12.raw
 
-# Отправить на дисплей (HDMI/LCD) через VO
+# Отправить на дисплей (DSI 720×1280) — pan-and-scan по панораме
 ./vi_grab_avs_dma -w 1920 -h 1080 --action vo --vo-dev 0 --vo-layer 1 --vo-chn 0 -n 300
 
 # Benchmark: прогнать 100 кадров, ничего не сохраняя
@@ -2839,7 +2839,7 @@ dma_buf_free(size, &fd, va);
 |--------|-----------|------------|
 | `--action save` | ✅ работает | `cam0_1920x1080_*.raw`, `cam1_1920x1080_*.raw` (3.1MB каждый) |
 | `--action free` | ✅ работает | ~20-34ms на кадр (benchmark) |
-| `--action vo` | ⚠️ VO init работает, SendFrame падает | VO init OK (`VO: layer=1 dev=0 chn=0 enabled (720x1280 DSI)`), но `VO_SendFrame` возвращает `0xffffffff`. Причина: кадр 1920×1080 не совпадает с layer 720×1280, а `bBypassFrame` отключает масштабирование. Без bypass — RGA конфликтует с AVS (`invalid job`). Нужно масштабировать кадр до SendFrame, но RGA занят AVS. |
+| `--action vo` | ✅ pan-and-scan | Crop окно 1280×720 из мега-кадра 3840×1080 по синусоиде, rotate 90° → 720×1280, SendFrame на VO layer 1 (bypass mode). Дисплей 720×1280 (портрет). Плавное движение по панораме туда-обратно по X и Y. |
 | `--rotate-cam 90` | ✅ работает | Кадры 1080×1920 (повёрнуты) |
 
 **Дисплей на плате:** DSI 720×1280 (портрет), `/dev/dri/card0`, connector `card0-DSI-1`. Управляется weston (Wayland) через DRM.
@@ -2892,11 +2892,32 @@ lvgl рендер → RGA copy area → RK_MPI_VO_SendFrame (UI layer, UI chn)
 4. **rkipc решает это разделением path**: VI chn для display (bind → VO, БЕЗ AVS) + отдельный VI chn для AVS/venc
 5. **rkadk решает через VPSS**: AVS → VPSS (scale) → VO (bind), VPSS использует RGA в pipeline режиме
 
-**Решение для vi_grab_avs_dma (не реализовано):**
-- **Вариант A (как rkipc):** добавить отдельный VI chn для display, bind → VO напрямую (мимо AVS). Но тогда на дисплей выводится только одна камера, не ститч.
-- **Вариант B (как rkadk):** добавить VPSS между AVS и VO: `AVS → VPSS (scale 720×1280) → VO (bind)`. VPSS масштабирует мега-кадр 3840×1080 → 720×1280.
-- **Вариант C (SendFrame + RGA scale):** масштабировать кадр через RGA **до** SendFrame. Но RGA занят AVS — нужно делать последовательно (AVS stitch → RGA scale → SendFrame), что замедлит pipeline.
-- **Вариант D (через weston/DRM):** отдать кадр в weston как wayland surface. Но weston использует CPU рендер (Pixman), без GPU/RGA — медленно.
+**Решение для vi_grab_avs_dma (реализован Вариант C — pan-and-scan):**
+
+`--action vo` использует **pan-and-scan** эффект:
+```
+AVS мега-кадр 3840×1080 (landscape)
+  → RGA: crop окно 1280×720 по синусоиде (X: 0..2560, Y: 0..360)
+  → RGA: rotate 90° → 720×1280 (портрет, идеально для DSI)
+  → SendFrame на VO layer 1 (bypass mode, 720×1280)
+```
+
+Синусоиды:
+- X: `sin(t * 0.04) * 0.5 + 0.5` → диапазон 0..(3840-1280)=2560, медленно
+- Y: `sin(t * 0.06 + 1.7) * 0.5 + 0.5` → диапазон 0..(1080-720)=360, сдвиг фазы
+
+Окно 1280×720 (landscape) поворачивается на 90° → 720×1280 (портрет), идеально совпадает с дисплеем, **без растяжения**. Плавное движение по панораме туда-обратно по X и Y.
+
+**Почему это работает:**
+- AVS использует RGA для stitch → завершено к моменту `GetChnFrame`
+- Наш RGA crop+rotate выполняется **после** AVS (последовательно, не конфликт)
+- VO в `bBypassFrame` mode — не использует RGA, кадр 720×1280 = layer 720×1280 (нет несовпадения)
+- `SendFrame` не падает (размер кадра совпадает с размером layer)
+
+**Другие варианты (не реализованы):**
+- **Вариант A (как rkipc):** отдельный VI chn → VO bind (мимо AVS). Только 1 камера, не ститч.
+- **Вариант B (как rkadk):** AVS → VPSS (scale) → VO bind. Сложно, нужен VPSS.
+- **Вариант D (через weston/DRM):** wayland surface. CPU рендер (Pixman), медленно.
 
 ### Файлы
 

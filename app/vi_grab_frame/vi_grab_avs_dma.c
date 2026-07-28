@@ -11,7 +11,7 @@
  *   VI dev0/1 → VI pipe0/1 → AVS grp0 → AVS chn0 (мега-кадр)
  *     → RGA crop+rotate → DMA буфер (cam0, cam1)
  *       → [save] fwrite (слепок для отладки)
- *       → [vo]   RK_MPI_VO_SendFrame (дисплей, zero-copy)
+ *       → [vo]   pan-and-scan: crop окно по синусоиде, rotate 90 → VO (дисплей 720×1280)
  *       → [free] dma_buf_free (просто освободить, benchmark)
  *
  * Использование:
@@ -43,6 +43,7 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/time.h>
+#include <math.h>
 
 #include "rk_defines.h"
 #include "rk_debug.h"
@@ -97,6 +98,8 @@ typedef struct {
     int voDevId;
     int voLayer;
     int voChn;
+    int voDispW;    /* display width (from VO driver, for pan-and-scan) */
+    int voDispH;    /* display height (from VO driver, for pan-and-scan) */
 } app_ctx_t;
 
 static void usage(const char *prog) {
@@ -127,13 +130,13 @@ static void usage(const char *prog) {
         "\n"
         "Actions:\n"
         "  save   — write DMA buffer to file (snapshot for debugging)\n"
-        "  vo     — send DMA buffer to VO display (zero-copy via MB_EXT)\n"
+        "  vo     — pan-and-scan: crop window from panorama by sine wave, rotate 90, send to display\n"
         "  free   — just release DMA buffer (benchmark pipeline throughput)\n"
         "\n"
         "Examples:\n"
         "  %s -w 1920 -h 1080 --action save\n"
         "  %s -w 1920 -h 1080 --action save --rotate-cam 90\n"
-        "  %s -w 1920 -h 1080 --action vo --vo-layer 0 --vo-chn 0 -n 300\n"
+        "  %s -w 1920 -h 1080 --action vo --vo-dev 0 --vo-layer 1 --vo-chn 0 -n 300  # pan-and-scan display\n"
         "  %s -w 1920 -h 1080 --action free -n 100   # benchmark\n",
         prog, DEFAULT_CHANNEL_ID, DEFAULT_FRAME_COUNT, DEFAULT_TIMEOUT_MS,
         prog, prog, prog, prog);
@@ -185,6 +188,8 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
     ctx->voDevId = 0;
     ctx->voLayer = 1;
     ctx->voChn = 0;
+    ctx->voDispW = 720;
+    ctx->voDispH = 1280;
     strcpy(ctx->outputPrefix, "cam");
 
     int opt;
@@ -343,6 +348,73 @@ static int rga_split_to_dma(MB_BLK mb, int mega_w, int mega_h,
     }
 
     *out_w = ow; *out_h = oh;
+    return 0;
+}
+
+/*
+ * rga_pan_to_dma — pan-and-scan: вырезать окно crop_w×crop_h из мега-кадра,
+ * позиция окна меняется по синусоиде (эффект плавного движения по панораме),
+ * повернуть на 90° → dst_w×dst_h (портрет для DSI дисплея).
+ *
+ * ZERO-COPY: src — rockit dmabuf, dst — DMA буфер.
+ * frame_idx — номер кадра (для синусоиды), mega_w/h — размер мега-кадра.
+ * Возвращает 0 при успехе. Заполняет out_fd, out_va, out_w, out_h.
+ */
+static int rga_pan_to_dma(MB_BLK mb, int mega_w, int mega_h,
+                          int crop_w, int crop_h, int dst_w, int dst_h,
+                          int frame_idx, int verbose,
+                          int *out_fd, void **out_va,
+                          int *out_w, int *out_h) {
+    /* Синусоиды: окно плавно гуляет по панораме туда-обратно */
+    /* X: 0 .. (mega_w - crop_w), Y: 0 .. (mega_h - crop_h) */
+    float t = (float)frame_idx;
+    float sx = sinf(t * 0.04f) * 0.5f + 0.5f;       /* медленно по X */
+    float sy = sinf(t * 0.06f + 1.7f) * 0.5f + 0.5f; /* медленно по Y, сдвиг фазы */
+    int max_x = mega_w - crop_w;
+    int max_y = mega_h - crop_h;
+    if (max_x < 0) max_x = 0;
+    if (max_y < 0) max_y = 0;
+    int crop_x = (int)(sx * max_x);
+    int crop_y = (int)(sy * max_y);
+
+    int osize = dst_w * dst_h * 3 / 2;  /* NV12 */
+    int rc = dma_buf_alloc(DMA_HEAP_UNCACHE_PATH, osize, out_fd, out_va);
+    if (rc < 0) {
+        fprintf(stderr, "[rga] pan: dma_buf_alloc failed\n");
+        return -1;
+    }
+
+    int src_fd = RK_MPI_MB_Handle2Fd(mb);
+    if (src_fd < 0) {
+        fprintf(stderr, "[rga] pan: Handle2Fd failed\n");
+        dma_buf_free(osize, out_fd, *out_va);
+        return -1;
+    }
+
+    rga_buffer_t src = wrapbuffer_fd_t(src_fd, mega_w, mega_h,
+                                       mega_w, mega_h, RK_FORMAT_YCbCr_420_SP);
+    rga_buffer_t dst = wrapbuffer_fd_t(*out_fd, dst_w, dst_h, dst_w, dst_h,
+                                       RK_FORMAT_YCbCr_420_SP);
+
+    im_rect srect = { .x = crop_x, .y = crop_y, .width = crop_w, .height = crop_h };
+    im_rect drect = { .width = dst_w, .height = dst_h };
+    im_rect prect = {0};
+
+    /* crop + rotate 90 + scale (если crop ≠ dst) в одной операции */
+    int usage = IM_HAL_TRANSFORM_ROT_90 | IM_SYNC;
+    IM_STATUS st = improcess(src, dst, pat_dummy(), srect, drect, prect, usage);
+    if (st != IM_STATUS_SUCCESS) {
+        fprintf(stderr, "[rga] pan: improcess failed: %d (crop=[%d,%d,%d,%d] → %dx%d rot=90)\n",
+                (int)st, crop_x, crop_y, crop_w, crop_h, dst_w, dst_h);
+        dma_buf_free(osize, out_fd, *out_va);
+        return -1;
+    }
+
+    if (verbose && (frame_idx % 30 == 0))
+        printf("  [rga] pan: crop=[%d,%d,%d,%d] → %dx%d rot=90 (sin x=%.2f y=%.2f)\n",
+               crop_x, crop_y, crop_w, crop_h, dst_w, dst_h, sx, sy);
+
+    *out_w = dst_w; *out_h = dst_h;
     return 0;
 }
 
@@ -649,6 +721,8 @@ int main(int argc, char **argv) {
         }
         int disp_w = VoPubAttr.stSyncInfo.u16Hact;
         int disp_h = VoPubAttr.stSyncInfo.u16Vact;
+        ctx.voDispW = disp_w;
+        ctx.voDispH = disp_h;
         if (ctx.verbose) printf("VO: display %dx%d (from driver)\n", disp_w, disp_h);
 
         /* In bypass mode, layer image size must match frame size (no scaling) */
@@ -724,45 +798,63 @@ int main(int argc, char **argv) {
         printf("Frame %d [proc]: %dx%d pts=%lldus grab=%lldms → RGA → DMA → %s\n",
                frame, w, h, pts_us, t_grab, action_str);
 
-        /* RGA: crop+rotate → 2 DMA буфера (zero-copy) */
-        int out_fds[2] = {-1, -1};
-        void *out_vas[2] = {NULL, NULL};
-        int out_w, out_h;
-        ret = rga_split_to_dma(stMegaFrame.stVFrame.pMbBlk,
-                               w, h, ctx.width, ctx.height,
-                               ctx.mode, ctx.rotateCam,
-                               out_fds, out_vas, &out_w, &out_h, ctx.verbose);
-        if (ret) {
-            fprintf(stderr, "  rga_split_to_dma failed\n");
-            RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
-            continue;
-        }
-
-        int osize = out_w * out_h * 3 / 2;
-        int cam;
+        int osize;
         long long t_act_start = get_now_ms();
-        switch (ctx.action) {
-        case ACTION_SAVE:
-            for (cam = 0; cam < NUM_SENSORS; cam++)
-                save_dma_to_file(out_vas[cam], osize, ctx.outputPrefix,
-                                 cam, out_w, out_h, pts_us);
-            break;
-        case ACTION_VO:
-            for (cam = 0; cam < NUM_SENSORS; cam++)
-                send_dma_to_vo(out_fds[cam], out_vas[cam], out_w, out_h,
-                               ctx.voLayer, ctx.voChn + cam, pts_us);
-            break;
-        case ACTION_FREE:
-            break;
-        }
-        long long t_act = get_now_ms() - t_act_start;
-        printf("  [%s] done in %lldms (out %dx%d, %d bytes each)\n",
-               action_str, t_act, out_w, out_h, osize);
 
-        /* Освободить DMA буферы (RGA уже завершил, данные больше не нужны) */
-        for (cam = 0; cam < NUM_SENSORS; cam++) {
-            if (out_fds[cam] >= 0)
-                dma_buf_free(osize, &out_fds[cam], out_vas[cam]);
+        if (ctx.action == ACTION_VO) {
+            /* Pan-and-scan: crop окно из мега-кадра по синусоиде, rotate 90 → дисплей */
+            int pan_fd = -1;
+            void *pan_va = NULL;
+            int pan_w, pan_h;
+            /* crop 1280×720 (landscape) из мега, rotate 90 → 720×1280 (портрет) */
+            int crop_w = 1280, crop_h = 720;
+            if (crop_w > w) crop_w = w;
+            if (crop_h > h) crop_h = h;
+            ret = rga_pan_to_dma(stMegaFrame.stVFrame.pMbBlk,
+                                 w, h, crop_w, crop_h,
+                                 ctx.voDispW, ctx.voDispH,
+                                 frame, ctx.verbose,
+                                 &pan_fd, &pan_va, &pan_w, &pan_h);
+            if (ret) {
+                fprintf(stderr, "  rga_pan_to_dma failed\n");
+                RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+                continue;
+            }
+            osize = pan_w * pan_h * 3 / 2;
+            send_dma_to_vo(pan_fd, pan_va, pan_w, pan_h,
+                           ctx.voLayer, ctx.voChn, pts_us);
+            dma_buf_free(osize, &pan_fd, pan_va);
+        } else {
+            /* save/free: split на 2 половинки (как раньше) */
+            int out_fds[2] = {-1, -1};
+            void *out_vas[2] = {NULL, NULL};
+            int out_w, out_h;
+            ret = rga_split_to_dma(stMegaFrame.stVFrame.pMbBlk,
+                                   w, h, ctx.width, ctx.height,
+                                   ctx.mode, ctx.rotateCam,
+                                   out_fds, out_vas, &out_w, &out_h, ctx.verbose);
+            if (ret) {
+                fprintf(stderr, "  rga_split_to_dma failed\n");
+                RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+                continue;
+            }
+            osize = out_w * out_h * 3 / 2;
+            int cam;
+            switch (ctx.action) {
+            case ACTION_SAVE:
+                for (cam = 0; cam < NUM_SENSORS; cam++)
+                    save_dma_to_file(out_vas[cam], osize, ctx.outputPrefix,
+                                     cam, out_w, out_h, pts_us);
+                break;
+            case ACTION_FREE:
+                break;
+            default:
+                break;
+            }
+            for (cam = 0; cam < NUM_SENSORS; cam++) {
+                if (out_fds[cam] >= 0)
+                    dma_buf_free(osize, &out_fds[cam], out_vas[cam]);
+            }
         }
 
         RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
