@@ -855,10 +855,12 @@ flowchart TD
 
 ### Полный пайплайн на этой плате (RV1126B + 2× GC2093)
 
+> **Важно:** Cam0 (0x37) — **IR матрица** (монохромная, module-name="IR"), Cam1 (0x7e) — **цветная** (module-name="default"). Оба чипа GC2093, но cam0 физически без Bayer CFA → отдаёт grayscale даже в формате NV12. Подробнее: [Cam0 = IR (grayscale)](#cam0--ir-grayscale-аппаратное-ограничение).
+
 ```mermaid
 flowchart TD
-    S1["GC2093 #1 (0x37)\n1920×1080 raw"] --> DPHY1["DPHY0 → CSI2"]
-    S2["GC2093 #2 (0x7e)\n1920×1080 raw"] --> DPHY2["DPHY3 → CSI2"]
+    S1["GC2093 #1 (0x37)\n1920×1080 raw\nIR (grayscale)"] --> DPHY1["DPHY0 → CSI2"]
+    S2["GC2093 #2 (0x7e)\n1920×1080 raw\ncolor"] --> DPHY2["DPHY3 → CSI2"]
     DPHY1 --> CIF1["rkcif-mipi-lvds\n/dev/media0"]
     DPHY2 --> CIF2["rkcif-mipi-lvds2\n/dev/media1"]
     CIF1 --> ISP1["rkisp-vir0\n/dev/video22\nISP + 3A (rkaiq_3A_server)"]
@@ -2960,6 +2962,85 @@ flowchart TD
 | rkipc ini | `app/rkipc/src/rv1126b_dual_ipc/rkipc-dual-800w.ini` | `[avs]`, `[isp]` секции |
 
 > **Note:** `group_iq_file` и `overlap_map_file` в `rk_aiq_camgroup_instance_cfg_t` существуют в API, но **`rk_aiq_uapi2_camgroup_create()` зависает** при их использовании на этой плате (проверено на RV1126B). Используйте camgroup без них — `config_file_dir` достаточно для базовой синхронизации AE/AWB.
+
+---
+
+## Cam0 = IR (grayscale) — аппаратное ограничение
+
+### Симптом
+
+При сохранении кадров с обеих камер (`--action save`) cam0 получается **grayscale** (чёрно-белый), cam1 — цветной. Проверка UV-каналов NV12:
+
+| Камера | Y mean | U dev from 128 | V dev from 128 | Результат |
+|--------|--------|----------------|----------------|----------|
+| cam0 (с rkaiq) | 142.6 | 0.70 | 2.92 | почти grayscale (U≈128) |
+| cam1 (с rkaiq) | 127.0 | 4.49 | 2.95 | COLOR |
+| cam0 (без rkaiq) | 63.0 | 0.74 | 0.84 | GRAYSCALE (тёмный) |
+| cam1 (без rkaiq) | 57.8 | 3.78 | 6.39 | COLOR (тёмный) |
+
+### Причина: IR матрица без Bayer CFA
+
+Cam0 (I2C 0x37) — **IR-версия** GC2093. Проверка device-tree:
+```bash
+$ cat /proc/device-tree/i2c@21110000/gc2093@37/rockchip,camera-module-name
+IR
+$ cat /proc/device-tree/i2c@21110000/gc2093-2@7e/rockchip,camera-module-name
+default
+```
+
+| Камера | I2C | module-name | Матрица | Bayer CFA | Цвет? |
+|--------|-----|-------------|---------|-----------|-------|
+| cam0 | 0x37 | `IR` | монохромная | ❌ нет | grayscale |
+| cam1 | 0x7e | `default` | цветная | ✅ есть | color |
+
+Оба чипа определяются как `galaxycore,gc2093` (одинаковый compatible), но cam0 физически без color filter array. Сенсор отдаёт Bayer RAW, но без CFA → ISP не может восстановить цвет → UV≈128 → grayscale.
+
+### Как rkaiq подбирает IQ файл
+
+`rkaiq_3A_server` передаёт только путь `/etc/iqfiles/`. Функция `AiqCamHw_selectIqFile()` (`external/camera_engine_rkaiq/rkaiq/hwi_c/aiq_CamHwBase.c:898`) формирует имя IQ файла из device-tree:
+```c
+sprintf(iqfile_name, "%s_%s_%s.json", sensor_name, module_name, lens_name);
+```
+
+Для нашего оборудования:
+| Камера | sensor | module | lens | IQ файл | Калибровка |
+|--------|--------|--------|------|---------|------------|
+| cam0 | gc2093 | IR | default | `gc2093_IR_default.json` | IR (монохром) |
+| cam1 | gc2093 | default | default | `gc2093_default_default.json` | цветная |
+
+Оба файла есть в `/etc/iqfiles/`:
+```bash
+$ ls /etc/iqfiles/gc2093*
+gc2093_IR_default.json        # для IR камеры (cam0)
+gc2093_default.json -> gc2093_default_default.json  # симлинк
+gc2093_default_default.json  # для цветной камеры (cam1)
+```
+
+**Вывод:** rkaiq **сам** подбирает правильный IQ файл для каждой камеры. IR-калибровка (`gc2093_IR_default.json`) настроена для монохрома — AWB даёт neutral цвета. Цвета на cam0 не будет никогда — это аппаратное ограничение IR матрицы.
+
+### Команды верификации
+
+```bash
+# 1. Проверить module-name в device-tree
+cat /proc/device-tree/i2c@21110000/gc2093@37/rockchip,camera-module-name    # IR
+cat /proc/device-tree/i2c@21110000/gc2093-2@7e/rockchip,camera-module-name  # default
+
+# 2. Проверить имена сенсоров в media topology
+media-ctl -d /dev/media0 --print-topology | grep entity.*gc2093
+# → entity 63: m00_b_gc2093 1-0037 (cam0, IR)
+media-ctl -d /dev/media1 --print-topology | grep entity.*gc2093
+# → entity 63: m01_b_gc2093 1-007e (cam1, color)
+
+# 3. Проверить IQ файлы
+ls /etc/iqfiles/gc2093*
+# → gc2093_IR_default.json (для cam0)
+# → gc2093_default_default.json (для cam1)
+
+# 4. Сохранить кадры и проверить UV
+vi_grab_avs_dma -w 1920 -h 1080 --action save -n 1 -s 30 -t 5000
+# cam0_*.raw — U_dev ≈ 0.7 (grayscale)
+# cam1_*.raw — U_dev ≈ 4.5 (color)
+```
 
 ---
 
