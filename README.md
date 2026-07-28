@@ -22,6 +22,95 @@ CLI-программы для стереокамеры на базе Rockchip RV
 
 ---
 
+## DSI дисплей RV1126B: характеристики и методология выяснения
+
+### Физические характеристики (доказательства из device-tree + DRM)
+
+| Параметр | Значение | Источник |
+|----------|----------|----------|
+| **Разрешение** | 720×1280 (portrait) | `/sys/class/drm/card0-DSI-1/modes` → `720x1280` |
+| **Ориентация** | портрет (720 ширина, 1280 высота) | `hactive=720`, `vactive=1280` (timing0) |
+| **Интерфейс** | MIPI DSI, 4 lanes | `dsi,lanes=4` (panel@0) |
+| **Pixel clock** | 60 МГц | `clock-frequency=60000000` (timing0) |
+| **Частота кадров** | ~56.45 Гц | `modetest -M rockchip -p` → `720x1280 56.45` |
+| **Физический размер** | 68×121 мм | `width-mm=68`, `height-mm=121` (panel@0) |
+| **Соотношение сторон** | 9:16 (portrait) | 720:1280 = 0.5625 |
+| **Connector** | DSI-1 (card0) | `/sys/class/drm/card0-DSI-1/status=connected` |
+| **CRTC** | crtc-0 (VOP0) | `cat /sys/kernel/debug/dri/0/state` → `crtc[72]: crtc-0` |
+| **Planes** | VOP0-win0-0 (overlay), VOP0-win2-0 (primary) | DRM state: 2 plane nodes |
+| **Backlight** | 200/255 (78%) | `/sys/class/backlight/backlight/brightness` |
+| **DPMS** | On | `/sys/class/drm/card0-DSI-1/dpms` |
+
+### Тайминги (timing0 из device-tree)
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| `hactive` | 720 | активные пиксели по горизонтали |
+| `hfront-porch` | 34 | передний порог H-sync |
+| `hback-porch` | 34 | задний порог H-sync |
+| `hsync-len` | 24 | длина H-sync |
+| **H total** | 812 | 720+34+34+24 |
+| `vactive` | 1280 | активные строки по вертикали |
+| `vfront-porch` | 20 | передний порог V-sync |
+| `vback-porch` | 6 | задний порог V-sync |
+| `vsync-len` | 3 | длина V-sync |
+| **V total** | 1309 | 1280+20+6+3 |
+| **Pixel clock** | 60 МГц | 812×1309×56.45 ≈ 60 МГц ✓ |
+
+### Методология выяснения
+
+**1. Device-tree (источник истины для hardware config):**
+```bash
+# DSI контроллер: /proc/device-tree/dsi@22120000/
+# Панель: /proc/device-tree/dsi@22120000/panel@0/
+# Тайминги: /proc/device-tree/dsi@22120000/panel@0/display-timings/timing0/
+
+# Чтение 32-bit big-endian свойств (device-tree формат):
+hex=$(od -An -tx1 /proc/device-tree/.../timing0/hactive | tr -d ' \n')
+printf "%d\n" 0x$hex   # → 720
+```
+
+**2. DRM sysfs (runtime state):**
+```bash
+cat /sys/class/drm/card0-DSI-1/status    # connected
+cat /sys/class/drm/card0-DSI-1/modes    # 720x1280
+cat /sys/class/drm/card0-DSI-1/dpms     # On
+cat /sys/class/backlight/backlight/brightness  # 200
+```
+
+**3. modetest (DRM modes из userspace):**
+```bash
+modetest -M rockchip -p
+# CRTCs: id=72, size=720x1280
+# Mode #0: 720x1280 56.45 ... 60000 (pixel clock 60MHz)
+```
+
+**4. DRM debugfs (plane/crtc state):**
+```bash
+cat /sys/kernel/debug/dri/0/state
+# plane[58]: VOP0-win2-0 (primary, zpos=0)
+# plane[73]: VOP0-win0-0 (overlay, zpos=0)
+# crtc[72]: crtc-0, enable=1, active=1
+```
+
+**5. Проверка расчётов:**
+- Частота кадров = pixel_clock / (H_total × V_total) = 60МГц / (812 × 1309) = 56.45 Гц ✓
+- Соотношение = 720/1280 = 0.5625 = 9:16 (portrait) ✓
+- Физический DPI = 720 / (68мм / 25.4) = 720 / 2.677 = 269 DPI (высокая плотность)
+
+### Почему вертикальная склейка (NOBLEND_VER)
+
+Дисплей **портретный** (720×1280, 9:16). Две камеры GC2093 дают 1920×1080 каждая (landscape, 16:9).
+
+| Склейка | Мега-кадр | После rot=90 | Вписывается в 720×1280? |
+|---------|-----------|--------------|--------------------------|
+| **HOR** (3840×1080) | 3840×1080 | 1080×3840 | ❌ слишком высокий |
+| **VER** (1920×2160) | 1920×2160 | 2160×1920 | ✅ pan-and-scan по 2160×1920 |
+
+При вертикальной склейке мега-кадр 1920×2160 → RGA crop 1280×720 → rotate 90 → 720×1280 → идеально вписывается в портретный дисплей. Pan-and-scan окно 1280×720 гуляет по 1920×2160 по синусоиде.
+
+---
+
 ## Пайплайн RV1126B: от камеры до оконечников (справочник)
 
 Чтобы не было путаницы между AVS, VPSS, RGA, VO, VOP и DRM — вот полный обзор аппаратных блоков и их связей на RV1126B. Все имена структур/enum соответствуют заголовкам в `external/rockit/mpi/sdk/include/`.
