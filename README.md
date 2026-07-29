@@ -586,19 +586,48 @@ VI (1920×1080) → GROUP 0
 | **ISP** | **да** | **НЕТ** | **НЕТ** | **НЕТ** | **НЕТ** | только OVERLAY_EX_RGN | **да** |
 | **VPSS** | да | да | **только tile input** | да | нет | только OVERLAY_EX_RGN | **НЕТ** |
 
-> Китайский оригинал, стр. 5302: *"只支持Scale，Mirror/Flip、Rotation、Crop、Cover/Mosaic均不支持"* (ISP device: только Scale, остальное НЕ поддерживается)
+> Китайский оригинал, стр. 6621 (онлайн-конверсия) / стр. 5302 (pdfplumber): *"只支持Scale，Mirror/Flip、Rotation、Crop、Cover/Mosaic均不支持"* (ISP device: только Scale, остальное НЕ поддерживается)
 
-> Китайский оригинал, стр. 5337: *"只有Tile模式的输入图像支持旋转，其他图像格式不支持"* (VPSS device: только Tile input поддерживает rotation)
+> Китайский оригинал, стр. 6679 (онлайн) / стр. 5337 (pdfplumber): *"只有Tile模式的输入图像支持旋转，其他图像格式不支持"* (VPSS device: только Tile input поддерживает rotation)
 
-**VGS** поддерживает rotation (стр. 16273: *"VGS支持对一幅图像进行0、90、180、270角度的旋转"*), но используется **только в PAST mode** (стр. 6197), не в USER mode.
+**VGS** поддерживает rotation (стр. 20211: *"VGS⽀持对⼀幅图像进⾏0、90、180、270⻆度的旋转"*), и в отличие от VPSS-rotate — **VGS можно использовать напрямую** через `RK_MPI_VGS_*` API (не только в PAST mode).
+
+**VGS rotation API** (доступен в нашем SDK, `external/rockit/mpi/sdk/include/rk_mpi_vgs.h`):
+
+```c
+VGS_HANDLE hHandle;
+VGS_TASK_ATTR_S stTask = {0};
+// stTask.stImgIn.stVFrame  = входной кадр (VIDEO_FRAME_S с MB_BLK)
+// stTask.stImgOut.stVFrame = выходной кадр (для 90/270 — width/height меняются местами)
+
+RK_MPI_VGS_BeginJob(&hHandle);
+RK_MPI_VGS_AddRotationTask(hHandle, &stTask, ROTATION_90);
+RK_MPI_VGS_EndJob(hHandle);
+// → кадр повёрнут аппаратно VGS, результат в stTask.stImgOut
+```
+
+Пример в SDK: `external/rockit/mpi/example/mod/test_mpi_vgs.cpp` (стр. 177-237, функция `unit_test_vgs_generate_rotation_task`).
+
+**Сравнение способов rotate на RV1126:**
+
+| Способ | Доступен? | Где работает | API |
+|--------|-----------|--------------|-----|
+| **RGA напрямую** (`improcess`) | **да** ✓ | вне rockit | `improcess()` (librga) |
+| **VGS напрямую** (`RK_MPI_VGS_*`) | **да** (в SDK) | внутри rockit | `RK_MPI_VGS_AddRotationTask` |
+| VPSS `SetChnRotation` + RGA device | нет | — | (не документировано) |
+| VPSS `SetChnRotation` + ISP device | нет | — | (ISP: только Scale) |
+| VPSS `SetChnRotation` + VPSS device | нет | — | (VPSS device недоступен, tile-only) |
+| VPSS `SetGrpRotation` | нет | — | (те же ограничения device) |
 
 **Вывод для rotate на RV1126:** VPSS rotate **не работает** ни на одном доступном device:
-- ISP device — только Scale, rotation **НЕ поддерживается** (китайский оригинал)
+- ISP device — только Scale, rotation **НЕ поддерживается** (китайский оригинал стр. 6621)
 - RGA device — rotate в VPSS context не документирован
-- VPSS device — недоступен на RV1126
-- VGS (rotation есть) — только PAST mode, не USER
+- VPSS device — недоступен на RV1126 (tile-only rotate, стр. 6679)
+- VGS через VPSS — только PAST mode (стр. 7769)
 
-**RGA rotate напрямую (вне VPSS, через `improcess`) — единственный доказанно работающий способ.**
+**Доступные альтернативы для rotate:**
+1. **RGA напрямую** (`improcess`) — доказанно работает, используется в наших программах
+2. **VGS напрямую** (`RK_MPI_VGS_AddRotationTask`) — есть в SDK, не тестировали
 
 > **Документация не покрывает RV1126B:** список поддерживаемых чипов в V2.13.3 (2024.10): RK3506, RK3308, RV1106/RV1103, RV1106B/RV1103B. **RV1126/RV1126B отсутствует** в списке, хотя упоминается в тексте. Возможно документация устаревшая или неполная для RV1126B.
 
