@@ -961,12 +961,19 @@ stModParam.stExtChnParam.mirrorCmsc = 0; // 1 is for vpss offline, 0 is for vpss
 | **RGA напрямую** (`improcess`) | любой | **да** ✓ | RGA hardware | низкая |
 | **VGS напрямую** (`RK_MPI_VGS_*`) | любой | да (в SDK) | VGS hardware | средняя |
 | **VPSS `SetChnRotation`** | online | **НЕТ** | — | — |
-| **VPSS `SetChnRotation`** | offline | **да** (теоретически) | GDC hardware | высокая |
-| **VPSS `SetChnRotationEx`** | offline | да (произвольный угол) | GDC hardware | высокая |
-| **VPSS `SetGrpRotation`** | offline | да (теоретически) | GDC hardware | высокая |
+| **VPSS `SetChnRotation`** | offline | **НЕТ** (протестировано!) | — | — |
+| **VPSS `SetGrpRotation`** | offline | **НЕТ** (протестировано!) | — | — |
+| **VPSS `SetChnRotationEx`** | offline | не тестировалось | GDC hardware | высокая |
 
-**Текущий выбор:** RGA напрямую — доказанно работает, просто, не требует смены режима VI.
-**Альтернатива для будущего:** VPSS offline + GDC rotate — аппаратно, без RGA, но требует переключения режима.
+**Тест на плате (доказательство):** `--vpss-offline --vpss-rotate` — VPSS offline mode через SendFrame работает (frames идут), `SetGrpRotation(90)` + `SetChnRotation(90)` возвращают success, но **rotate не применяется** — выход 1920×1080 без поворота. VPSS rotate молча игнорируется на RV1126B.
+
+**Итог:** VPSS rotate **НЕ работает на RV1126B вообще** — ни в online, ни в offline mode. API возвращает success но rotation не применяется. RGA — единственный рабочий способ rotate.
+
+**Рабочий пайплайн с VPSS offline (без rotate):**
+```
+VI → VPSS (offline, SendFrame, scale, fan-out) → RGA (rotate) → VO
+```
+VPSS делает scale + fan-out (несколько каналов), RGA делает rotate. `--vpss-offline` без `--vpss-rotate` — работает (20/20 frames).
 
 #### Оптимальный путь: поворот кадра с двух сенсоров
 
@@ -983,35 +990,35 @@ stModParam.stExtChnParam.mirrorCmsc = 0; // 1 is for vpss offline, 0 is for vpss
 - ✅ **Просто** — ~30 строк кода
 - ❌ Занимает RGA (но для одной камеры это не проблема)
 
-**Задача 2: Стерео + RKNN + OSD (будущая) — VPSS offline + GDC**
+**Задача 2: Стерео + RKNN + OSD (будущая) — VPSS offline (scale+fan-out) + RGA (rotate)**
 
 ```
-Сенсор 0 → VI → VPSS group 0 (offline, SendFrame)
-                   ├─ CHN0: 720×1280 rotate 90° → VO (дисплей)
-                   └─ CHN1: 640×480  rotate 90° → RKNN (детекция)
+Сенсор 0 → VI → VPSS group 0 (offline, SendFrame, scale)
+                   ├─ CHN0: 720×1280 → RGA rotate 90° → VO (дисплей)
+                   └─ CHN1: 640×480  → RGA rotate 90° → RKNN (детекция)
 
-Сенсор 1 → VI → VPSS group 1 (offline, SendFrame)
-                   ├─ CHN0: 720×1280 rotate 90° → VO
-                   └─ CHN1: 640×480  rotate 90° → RKNN
+Сенсор 1 → VI → VPSS group 1 (offline, SendFrame, scale)
+                   ├─ CHN0: 720×1280 → RGA rotate 90° → VO
+                   └─ CHN1: 640×480  → RGA rotate 90° → RKNN
 
-RGA — свободен для OSD / bounding boxes
+RGA — делает rotate для каждого канала (но не scale, VPSS уже сделал)
 ```
 
 Оптимально для будущей задачи:
-- ✅ **Fan-out** — 1 вход → N выходов (разные размеры для VO/RKNN)
-- ✅ **Rotate + scale за один проход** (GDC + VPSS)
-- ✅ **RGA свободен** — для OSD, bounding boxes
+- ✅ **Fan-out** — 1 вход → N выходов (разные размеры для VO/RKNN) — **доказано работает** (`--vpss-offline`, 20/20 frames)
+- ✅ **Scale через VPSS** — аппаратно, не занимает RGA
+- ✅ **Rotate через RGA** — доказано работает (единственный рабочий способ на RV1126B)
 - ✅ **Parallel** — 2 VPSS группы обрабатывают 2 сенсора одновременно
 - ✅ **Zero-copy** — MB_BLK дескриптор
-- ⚠️ **Не доказано** — нужно тестировать (плата ожила, можно!)
-- ⚠️ Сложнее код (управление буфером)
+- ❌ VPSS rotate **НЕ работает** (протестировано — API возвращает success но rotate не применяется)
+- ⚠️ RGA занят rotate для каждого канала (но scale уже сделан VPSS)
 
 **Почему не online VPSS?**
 ```
 Сенсор → VI → VPSS (online, bind) → ???
 ```
 - ❌ Rotate **НЕ работает** (`online not support rotate` — доказано)
-- ❌ Нет fan-out преимущества (и так через RGA пришлось бы rotate)
+- ✅ Fan-out работает, но rotate всё равно через RGA
 
 **Почему не VGS?**
 ```
@@ -1021,27 +1028,25 @@ RGA — свободен для OSD / bounding boxes
 - VGS — синхронный API (BeginJob/EndJob), не пайплайн
 - Нет fan-out
 
-**Сравнение всех способов:**
+**Сравнение всех способов (после тестирования на плате):**
 
-| | RGA прямой | VPSS offline + GDC | VPSS online | VGS |
+| | RGA прямой | VPSS offline + RGA | VPSS online | VGS |
 |---|---|---|---|---|
-| **Rotate** | ✅ доказано | ⚠️ гипотеза | ❌ нет | ✅ есть |
-| **Scale** | ✅ | ✅ | ✅ | ❌ |
-| **Один проход** | ✅ | ✅ | — | ❌ (2 прохода) |
-| **Fan-out** | ❌ | ✅ (6 каналов) | ✅ | ❌ |
-| **RGA занят** | ✅ да | ❌ нет (свободен) | — | ❌ нет |
+| **Rotate** | ✅ доказано | ✅ доказано (RGA) | ❌ нет | ✅ есть |
+| **Scale** | ✅ (RGA) | ✅ (VPSS) | ✅ (VPSS) | ❌ |
+| **Один проход** | ✅ | ✅ (VPSS scale + RGA rotate) | — | ❌ (2 прохода) |
+| **Fan-out** | ❌ | ✅ (6 каналов, доказано) | ✅ | ❌ |
+| **RGA занят** | ✅ да (scale+rotate) | ✅ да (rotate only) | — | ❌ нет |
 | **Parallel 2 сенсора** | ❌ (последовательно) | ✅ (2 группы) | ✅ | ❌ |
 | **Zero-copy** | ✅ | ✅ | ✅ | ✅ |
-| **Доказано** | ✅ | ❌ | ✅ (без rotate) | ❌ |
+| **Доказано** | ✅ | ✅ (20/20 frames) | ✅ (без rotate) | ❌ |
 | **Сложность** | низкая | средняя | низкая | средняя |
 
 **Рекомендация:**
-- **Сейчас:** оставить RGA прямой — работает, просто, достаточно для дисплея.
-- **Когда плата стабильна:** протестировать VPSS offline + GDC rotate:
-  1. Модифицировать `vi_grab_dual` — убрать `RK_MPI_SYS_Bind`, добавить `SendFrame`
-  2. Добавить `SetChnRotation(90)`
-  3. Проверить — если кадр повёрнут, гипотеза подтверждена
-  4. Если работает — переходить на VPSS offline для будущего stereo + RKNN
+- **Сейчас:** RGA прямой — работает, просто, достаточно для дисплея с одной камерой.
+- **Для stereo + RKNN:** VPSS offline (scale + fan-out) + RGA (rotate) — доказано работает, даёт fan-out для разных разрешений.
+- **VPSS rotate — НЕ использовать** — не работает на RV1126B (протестировано в online и offline mode).
+
 
 #### Сводная таблица: VPSS vs RGA
 
