@@ -731,6 +731,93 @@ RK_S32 RK_MPI_VPSS_SetChnRotationEx(VPSS_GRP VpssGrp, VPSS_CHN VpssChn,
 
 **Но это сложнее** чем RGA напрямую — нужно менять режим VI, что может повлиять на другие каналы.
 
+#### VPSS offline через SendFrame — альтернативный путь
+
+**Гипотеза:** Если кормить VPSS кадр вручную через `RK_MPI_VPSS_SendFrame` (без bind с VI), это **автоматически включает offline mode** — rotate должен заработать через GDC.
+
+**Доказательство из SDK** (`external/rockit/mpi/example/common/test_mod_vpss.cpp`):
+
+Пример `TEST_VPSS_ModInit` показывает полный цикл **без bind с VI**:
+```c
+// 1. Создать группу (без RK_MPI_SYS_Bind с VI!)
+TEST_VPSS_Start(grp, chnNum, &grpAttr, chnAttr);
+
+// 2. Установить device
+RK_MPI_VPSS_SetVProcDev(grp, VIDEO_PROC_DEV_VPSS);
+
+// 3. Установить rotate
+RK_MPI_VPSS_SetGrpRotation(grp, ROTATION_90);        // group rotate
+TEST_VPSS_SetChnRotation(grp, chn, ROTATION_90);     // channel rotate
+TEST_VPSS_SetChnRotationEx(grp, chn, rotationEx);    // произвольный угол
+
+// 4. Подать кадр вручную (вместо bind с VI)
+RK_MPI_VPSS_SendFrame(grp, 0, &videoFrame, -1);
+
+// 5. Получить обработанный кадр
+RK_MPI_VPSS_GetChnFrame(grp, chn, &frameOut, -1);
+// → кадр повёрнут аппаратно через GDC
+```
+
+**Ключевое:** в примере `TEST_VPSS_Start` (`test_comm_vpss.cpp:51-91`) **нет `RK_MPI_SYS_Bind`** — группа создаётся без привязки к VI. Кадры подаются через `SendFrame`. Это и есть **offline mode**.
+
+**Доказательство из `librockit.so`:**
+- `vpss_send_frame` — функция подачи кадра
+- `findVpssOfflineDev` — поиск offline устройства
+- `rkvpss-offline` — offline устройство
+- `gdc_send_frame` — GDC принимает кадр для rotate
+- `create gdc success for chn(%d)` — GDC создаётся для канала
+- `prep:rotation` — подготовка rotation
+
+**Логика:** когда VPSS группа не привязана к VI (нет bind), rockit использует `rkvpss-offline` устройство вместо online VI ext channels. В offline mode rotate работает через GDC.
+
+**Сравнение online vs offline (через SendFrame):**
+
+| Параметр | online (bind с VI) | offline (SendFrame) |
+|----------|---------------------|---------------------|
+| Подача кадра | `RK_MPI_SYS_Bind(VI→VPSS)` | `RK_MPI_VPSS_SendFrame(grp, ...)` |
+| Устройство | VI ext channels (`rkvpss_scale0-3`) | `rkvpss-offline` |
+| Rotate | **НЕТ** (`online not support rotate`) | **ДА** (через GDC) |
+| Mirror | **НЕТ** | **ДА** |
+| Scale | да | да |
+| Crop | да | да |
+| Доп. копирование | нет (zero-copy из VI) | **да** (VI→app→VPSS) |
+| Сложность | низкая | средняя |
+
+**Минус offline через SendFrame:** нужен лишний шаг — получить кадр из VI в приложение, потом подать в VPSS. В online mode кадр идёт напрямую VI→VPSS (zero-copy).
+
+**Как это применимо к нам:**
+
+Наш пайплайн сейчас: `VI → VPSS (online, scale) → RGA (rotate) → VO`
+
+Альтернатива через offline: `VI → app → VPSS (offline, scale+rotate via GDC) → VO`
+
+```c
+// Получаем кадр из VI
+RK_MPI_VI_GetChnFrame(viDev, viChn, &viFrame, -1);
+
+// Подаём в VPSS (offline mode, без bind)
+RK_MPI_VPSS_SendFrame(vpssGrp, 0, &viFrame, -1);
+
+// Получаем повёрнутый+отмасштабированный кадр
+RK_MPI_VPSS_GetChnFrame(vpssGrp, vpssChn, &outFrame, -1);
+// → outFrame уже повёрнут на 90° и отмасштабирован до 720×1280
+
+// Отдаём в VO
+RK_MPI_VO_SendFrame(voLayer, voChn, &outFrame, -1);
+```
+
+**Преимущества над RGA:**
+- Rotate + scale **за один проход** аппаратно (GDC + VPSS)
+- Не занимает RGA (RGA свободен для других задач — OSD, bounding boxes)
+- Fan-out: один VPSS group → несколько каналов (VO + RKNN с разными размерами)
+
+**Недостатки:**
+- Лишнее копирование VI→app→VPSS (в online mode zero-copy)
+- Нужно тестировать (не доказано что работает на RV1126B)
+- Сложнее код
+
+**Статус:** гипотеза, основанная на SDK примере и строках из `librockit.so`. **Требует тестирования на плате.**
+
 #### Сводная таблица: rotate на RV1126B (восстановленная)
 
 | Способ | Режим | Работает? | Через что | Сложность |
