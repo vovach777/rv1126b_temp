@@ -780,10 +780,35 @@ RK_MPI_VPSS_GetChnFrame(grp, chn, &frameOut, -1);
 | Mirror | **НЕТ** | **ДА** |
 | Scale | да | да |
 | Crop | да | да |
-| Доп. копирование | нет (zero-copy из VI) | **да** (VI→app→VPSS) |
+| Копирование пикселей | **нет** (zero-copy) | **нет** (zero-copy — передаётся MB_BLK) |
+| Управление буфером | rockit сам | вручную (держать до GetChnFrame) |
 | Сложность | низкая | средняя |
 
-**Минус offline через SendFrame:** нужен лишний шаг — получить кадр из VI в приложение, потом подать в VPSS. В online mode кадр идёт напрямую VI→VPSS (zero-copy).
+**Важно: копирования пикселей НЕТ в обоих режимах.** Кадр живёт в железе (MMZ/dmabuf). Передаётся **дескриптор** `MB_BLK`, не сами пиксели:
+
+```c
+// VI отдаёт дескриптор буфера (не пиксели)
+RK_MPI_VI_GetChnFrame(viDev, viChn, &viFrame, -1);
+// viFrame.stVFrame.pMbBlk — дескриптор (указатель на буфер в MMZ)
+
+// Отдаём тот же дескриптор в VPSS (zero-copy!)
+RK_MPI_VPSS_SendFrame(vpssGrp, 0, &viFrame, -1);
+
+// VPSS/GDC работают с тем же буфером через IOMMU (аппаратный доступ к памяти)
+```
+
+Это **тот же принцип** что мы используем сейчас для RGA:
+```c
+// Наш текущий код (vi_grab_dual.c:380)
+int src_fd = RK_MPI_MB_Handle2Fd(src_mb);   // dmabuf fd из MB_BLK
+wrapbuffer_fd_t(src_fd, ...);                // RGA работает с тем же буфером
+```
+
+**Разница online vs offline — не в копировании, а в управлении буфером:**
+- **online (bind):** rockit сам управляет — VI отдаёт кадр VPSS, VPSS отдаёт дальше, буфер возвращается в пул VI автоматически
+- **offline (SendFrame):** приложение управляет — нужно держать `viFrame` (не вызывать `ReleaseChnFrame`) пока VPSS не закончит обработку (после `GetChnFrame` из VPSS)
+
+**Минус offline через SendFrame:** нужно вручную управлять временем жизни буфера — не освобождать VI кадр пока VPSS не отдаст результат. В online mode rockit делает это сам.
 
 **Как это применимо к нам:**
 
@@ -810,9 +835,10 @@ RK_MPI_VO_SendFrame(voLayer, voChn, &outFrame, -1);
 - Rotate + scale **за один проход** аппаратно (GDC + VPSS)
 - Не занимает RGA (RGA свободен для других задач — OSD, bounding boxes)
 - Fan-out: один VPSS group → несколько каналов (VO + RKNN с разными размерами)
+- **Zero-copy** — кадр передаётся как MB_BLK (дескриптор), не копируется
 
 **Недостатки:**
-- Лишнее копирование VI→app→VPSS (в online mode zero-copy)
+- Нужно вручную управлять временем жизни буфера (держать VI кадр пока VPSS не отдаст результат)
 - Нужно тестировать (не доказано что работает на RV1126B)
 - Сложнее код
 
