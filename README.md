@@ -505,6 +505,91 @@ vpss_proc_dev = vpss    ; ← VIDEO_PROC_DEV_VPSS (аппаратный), НЕ r
 
 **Производительность**: аппаратный VPSS быстрее RGA для scale/crop (специализированный конвейер). Прямой вызов RGA (`improcess`) удобнее для одиночных операций вне rockit-пайплайна.
 
+#### Архитектура VPSS: Group и Channel
+
+> **Источник:** Rockchip Developer Guide MPI EN (`Rockchip_Developer_Guide_MPI_EN.docx.md`), раздел "VPSS Basic Concepts". Цитаты и номера строк приведены по markdown-экспорту.
+
+**Group (группа) = входной поток** в VPSS. К группе привязывается **один** источник (VI/VDEC/AVS или ручная подача через `SendFrame`).
+
+> *"Each group time-shares hardware devices; the hardware processes the tasks submitted by each group in turn."* (стр. 10176-10178)
+
+> *"Each Group can only be bound to one input source."* (стр. 10467-10468)
+
+**Channel (канал) = выход** из группы. Все каналы одной группы получают **один и тот же вход**, но каждый выдаёт свой размер/формат/rotate/crop.
+
+> *"VPSS group's channel. Provides multiple channels, each with scaling, cropping and other functions. Scales the image to the target resolution set by the user."* (стр. 10180-10184)
+
+**Лимиты на RV1126B** (`external/rockit/lib/arm64/rv1126b/rk_defines.h`):
+```c
+#define VPSS_MAX_GRP_NUM   256   // до 256 групп (входов)
+#define VPSS_MAX_CHN_NUM     6   // до 6 каналов на группу (выходов)
+```
+
+**Схема:**
+
+```
+Сенсор 0 (VI) ──┐                          ┌─ CHN0 ──→ 1920×1080 NV12 ──→ VENC (запись)
+                ├─→ GROUP 2 ──┬─ CHN0 ──→ │
+                │             ├─ CHN1 ──→ │  (до 6 каналов, каждый со своим
+                │             ├─ CHN2 ──→ │   scale/crop/rotate/format)
+                │             ├─ CHN3 ──→ │
+                │             ├─ CHN4 ──→ │
+                │             └─ CHN5 ──→ │
+                │                         │
+Сенсор 1 (VI) ──┘                         │
+                │                         │
+                └─→ GROUP 3 ──┬─ CHN0 ──→ ┘  (то же для 2-й камеры)
+                             ├─ CHN1 ──→
+                             └─ ...    ──→
+```
+
+**Типичный пример — один сенсор, три потребителя:**
+```
+VI (1920×1080) → GROUP 0
+                   ├─ CHN0: 1920×1080 NV12  → VENC (запись H264)
+                   ├─ CHN1: 1280×720  NV12  → VO   (превью на дисплей)
+                   └─ CHN2: 224×224   RGB   → NPU  (нейросеть)
+```
+Один вход — три разных выхода (запись, превью, AI). Без VPSS пришлось бы делать 3 захвата с сенсора.
+
+**Что настраивается на каком уровне:**
+
+| Уровень | Что | Пример API |
+|---------|-----|-----------|
+| **Group** | размер входа, формат, frame rate, **mirror, crop, rotation** | `SetGrpAttr`, `SetGrpCrop`, `SetGrpRotation`, `SetGrpMirror` |
+| **Channel** | размер выхода, формат, scale, crop, **rotation, mirror, flip** | `SetChnAttr`, `SetChnCrop`, `SetChnRotation`, `SetChnMirror` |
+
+**И группа, и канал имеют rotation.** Разница:
+- `SetGrpRotation` — применяется к входу **до** каналов (один rotate → все каналы получают повёрнутый кадр)
+- `SetChnRotation` — применяется к выходу **конкретного канала** (можно разные углы для разных каналов)
+
+**Hardware device (на RV1126 — RGA по умолчанию, можно переключить на ISP):**
+
+| Чип | Доступные device | По умолчанию |
+|-----|------------------|--------------|
+| RV1109/RV1126 | RGA, ISP | RGA |
+| RV1103/RV1106 | RGA | RGA |
+| RK356X | GPU, RGA | GPU |
+| RK3588 | GPU, RGA | GPU |
+
+> *"RV1109/RV1126 — RGA (Default Device), ISP"* (стр. 10302)
+
+Переключение: `RK_MPI_VPSS_SetVProcDev(grp, VIDEO_PROC_DEV_ISP)`.
+
+**Ограничения device на RV1126:**
+
+| Device | Scale | Mirror/Flip | Rotation | Crop | Mosaic | Overlay alpha |
+|--------|-------|-------------|----------|------|--------|---------------|
+| **RGA** (по умолч.) | да | да | (не документировано) | да | нет | нет (YUV+alpha) |
+| **ISP** | да | да | **да** | да | нет | только OVERLAY_EX_RGN |
+| **VPSS** (на RV1126 недоступен) | да | да | **только tile input** | да | нет | только OVERLAY_EX_RGN |
+
+> *"ISP: Supports Scale Only Mirror/Flip Rotation Crop Cover/Mosaic Neither supported"* (стр. 10338-10339)
+
+> *"VPSS device: Rotation — Only Tile the input image in the mode supports rotation. Other image formats are not supported."* (стр. 10425-10426) — **относится только к VPSS device, которого на RV1126 нет.**
+
+**Вывод для rotate на RV1126:** VPSS rotate должен работать через **ISP device** (`SetVProcDev(VIDEO_PROC_DEV_ISP)`). RGA device (по умолчанию) rotate в VPSS не документирован. Tile-only ограничение относится к VPSS device, недоступному на RV1126.
+
 #### Сводная таблица: VPSS vs RGA
 
 | Критерий | **VPSS** | **RGA** |
