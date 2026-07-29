@@ -126,6 +126,7 @@ typedef struct {
     int vpssScale;        /* --vpss-scale: VPSS scale до pre-rotate размера дисплея */
     int vpssRotate;       /* --vpss-rotate: VPSS rotate 90 (без RGA) */
     int vpssOffline;      /* --vpss-offline: VPSS offline mode (SendFrame, rotate via GDC) */
+    int voRotate;         /* --vo-rotate: VO hardware rotate 90° (VOP2, per rkipc RV1126B) */
     VIDEO_FRAME_INFO_S viHeldFrame[NUM_SENSORS]; /* VI frames held during offline VPSS */
 } app_ctx_t;
 
@@ -167,6 +168,8 @@ static void usage(const char *prog) {
         "                          VPSS does scale+rotate, output = display size\n"
         "  --vpss-offline          with --vpss: VPSS offline mode via SendFrame\n"
         "                          (no VI bind, rotate via GDC, enables fan-out)\n"
+        "  --vo-rotate             VO hardware rotate 90° (VOP2, per rkipc RV1126B)\n"
+        "                          RGA does scale only, VO does rotate\n"
         "  --help                  show this help\n"
         "\n"
         "Examples:\n"
@@ -202,6 +205,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
         {"vpss-scale",      no_argument,       0, 1010},
         {"vpss-rotate",     no_argument,       0, 1011},
         {"vpss-offline",    no_argument,       0, 1012},
+        {"vo-rotate",       no_argument,       0, 1013},
         {"help",            no_argument,       0, '?'},
         {0, 0, 0, 0}
     };
@@ -220,6 +224,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     int vpssScale = 0;
     int vpssRotate = 0;
     int vpssOffline = 0;
+    int voRotate = 0;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "w:h:W:H:c:o:n:t:v", long_opts, NULL)) != -1) {
@@ -249,6 +254,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
             case 1010: vpssScale = 1; break;
             case 1011: vpssRotate = 1; break;
             case 1012: vpssOffline = 1; useVpss = 1; break;  /* offline implies --vpss */
+            case 1013: voRotate = 1; break;
             case '?':
             default:
                 usage(argv[0]);
@@ -291,6 +297,7 @@ static int parse_args(app_ctx_t *app, int argc, char **argv) {
     app->vpssScale = vpssScale;
     app->vpssRotate = vpssRotate;
     app->vpssOffline = vpssOffline;
+    app->voRotate = voRotate;
 
     return 0;
 }
@@ -768,15 +775,25 @@ static int vo_init(app_ctx_t *app) {
     VoChnAttr.u32Priority = 1;
     VoChnAttr.stRect.s32X = 0;
     VoChnAttr.stRect.s32Y = 0;
-    VoChnAttr.stRect.u32Width = app->voDispW;
-    VoChnAttr.stRect.u32Height = app->voDispH;
+    /* When VO rotates 90°, send LANDSCAPE frame (dispH × dispW) and VO
+     * rotates to PORTRAIT (dispW × dispH). Per rkipc RV1126B (video.c:2036). */
+    if (app->voRotate) {
+        VoChnAttr.stRect.u32Width = app->voDispH;   /* landscape width */
+        VoChnAttr.stRect.u32Height = app->voDispW;  /* landscape height */
+        VoChnAttr.enRotation = ROTATION_90;
+    } else {
+        VoChnAttr.stRect.u32Width = app->voDispW;
+        VoChnAttr.stRect.u32Height = app->voDispH;
+        VoChnAttr.enRotation = ROTATION_0;
+    }
     ret = RK_MPI_VO_SetChnAttr(app->voLayer, app->voChn, &VoChnAttr);
     if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetChnAttr: %#x\n", ret); return -1; }
     ret = RK_MPI_VO_EnableChn(app->voLayer, app->voChn);
     if (ret != RK_SUCCESS) { fprintf(stderr, "VO_EnableChn: %#x\n", ret); return -1; }
 
-    printf("VO: layer=%d dev=%d chn=%d enabled (%dx%d DSI)\n",
-           app->voLayer, app->voDevId, app->voChn, app->voDispW, app->voDispH);
+    printf("VO: layer=%d dev=%d chn=%d enabled (%dx%d DSI, rotation=%d)\n",
+           app->voLayer, app->voDevId, app->voChn, app->voDispW, app->voDispH,
+           app->voRotate ? 90 : 0);
     return 0;
 }
 
@@ -978,16 +995,24 @@ int main(int argc, char **argv) {
             int vh = stViFrame.stVFrame.u32VirHeight;
             long long pts_us = (long long)stViFrame.stVFrame.u64PTS;
 
-            /* RGA scale+rotate → MMZ.
-             * VPSS rotate НЕ работает на RV1126B (доказано тестом — API
-             * возвращает success но rotate не применяется, даже в offline mode).
-             * Поэтому RGA всегда делает и scale, и rotate. */
+            /* RGA → MMZ.
+             * --vo-rotate: RGA does scale only (landscape), VO does rotate 90°.
+             * Otherwise: RGA does scale+rotate. */
             MB_BLK cur_blk = app.panBlk[app.panIdx];
             app.panIdx ^= 1;
-            ret = rga_scale_rotate_to_mmz(stViFrame.stVFrame.pMbBlk, w, h,
-                                          vw, vh,
-                                          app.voDispW, app.voDispH,
-                                          app.verbose, cur_blk);
+            if (app.voRotate) {
+                /* RGA scale to landscape (dispH × dispW), VO rotates to portrait */
+                ret = rga_scale_to_mmz(stViFrame.stVFrame.pMbBlk, w, h,
+                                       vw, vh,
+                                       app.voDispH, app.voDispW,  /* landscape */
+                                       app.verbose, cur_blk);
+            } else {
+                /* RGA scale+rotate to portrait (dispW × dispH) */
+                ret = rga_scale_rotate_to_mmz(stViFrame.stVFrame.pMbBlk, w, h,
+                                              vw, vh,
+                                              app.voDispW, app.voDispH,
+                                              app.verbose, cur_blk);
+            }
             if (ret) {
                 fprintf(stderr, "  rga failed\n");
                 release_frame(&app, cur_cam, &stViFrame);
@@ -996,12 +1021,16 @@ int main(int argc, char **argv) {
 
             /* Опциональная рамка цвета камеры (--rect) */
             if (app.rectEnabled) {
-                draw_rect(cur_blk, app.voDispW, app.voDispH,
+                int rw = app.voRotate ? app.voDispH : app.voDispW;
+                int rh = app.voRotate ? app.voDispW : app.voDispH;
+                draw_rect(cur_blk, rw, rh,
                           app.rectInset, app.rectThick, cur_cam);
             }
 
-            /* Отправить в VO */
-            send_mmz_to_vo(cur_blk, app.voDispW, app.voDispH,
+            /* Отправить в VO (landscape if voRotate, VO rotates to portrait) */
+            int send_w = app.voRotate ? app.voDispH : app.voDispW;
+            int send_h = app.voRotate ? app.voDispW : app.voDispH;
+            send_mmz_to_vo(cur_blk, send_w, send_h,
                            app.voLayer, app.voChn, pts_us);
 
             release_frame(&app, cur_cam, &stViFrame);
