@@ -576,19 +576,31 @@ VI (1920×1080) → GROUP 0
 
 Переключение: `RK_MPI_VPSS_SetVProcDev(grp, VIDEO_PROC_DEV_ISP)`.
 
-**Ограничения device на RV1126:**
+**Ограничения device на RV1126** (по китайскому оригиналу `Rockchip_Developer_Guide_MPI_CN.pdf` V2.13.3):
 
-| Device | Scale | Mirror/Flip | Rotation | Crop | Mosaic | Overlay alpha |
-|--------|-------|-------------|----------|------|--------|---------------|
-| **RGA** (по умолч.) | да | да | (не документировано) | да | нет | нет (YUV+alpha) |
-| **ISP** | да | да | **да** | да | нет | только OVERLAY_EX_RGN |
-| **VPSS** (на RV1126 недоступен) | да | да | **только tile input** | да | нет | только OVERLAY_EX_RGN |
+> **ВНИМАНИЕ:** английская версия документации (`Rockchip_Developer_Guide_MPI_EN.docx.md`) содержит **неверный перевод** строки про ISP device. Английская версия: *"Supports Scale Only Mirror/Flip Rotation Crop Cover/Mosaic Neither supported"* — двусмысленно, можно понять как "поддерживает Scale, Mirror/Flip, Rotation, Crop". Но китайский оригинал (стр. 5302): *"只支持Scale，Mirror/Flip、Rotation、Crop、Cover/Mosaic均不支持"* = **"Только поддерживает Scale. Mirror/Flip, Rotation, Crop, Cover/Mosaic — все не поддерживаются"**.
 
-> *"ISP: Supports Scale Only Mirror/Flip Rotation Crop Cover/Mosaic Neither supported"* (стр. 10338-10339)
+| Device | Scale | Mirror/Flip | Rotation | Crop | Mosaic | Overlay alpha | Доступен на RV1126 |
+|--------|-------|-------------|----------|------|--------|---------------|---------------------|
+| **RGA** (по умолч.) | да | да | (не документировано в VPSS) | да | нет | нет (YUV+alpha) | **да** |
+| **ISP** | **да** | **НЕТ** | **НЕТ** | **НЕТ** | **НЕТ** | только OVERLAY_EX_RGN | **да** |
+| **VPSS** | да | да | **только tile input** | да | нет | только OVERLAY_EX_RGN | **НЕТ** |
 
-> *"VPSS device: Rotation — Only Tile the input image in the mode supports rotation. Other image formats are not supported."* (стр. 10425-10426) — **относится только к VPSS device, которого на RV1126 нет.**
+> Китайский оригинал, стр. 5302: *"只支持Scale，Mirror/Flip、Rotation、Crop、Cover/Mosaic均不支持"* (ISP device: только Scale, остальное НЕ поддерживается)
 
-**Вывод для rotate на RV1126:** VPSS rotate должен работать через **ISP device** (`SetVProcDev(VIDEO_PROC_DEV_ISP)`). RGA device (по умолчанию) rotate в VPSS не документирован. Tile-only ограничение относится к VPSS device, недоступному на RV1126.
+> Китайский оригинал, стр. 5337: *"只有Tile模式的输入图像支持旋转，其他图像格式不支持"* (VPSS device: только Tile input поддерживает rotation)
+
+**VGS** поддерживает rotation (стр. 16273: *"VGS支持对一幅图像进行0、90、180、270角度的旋转"*), но используется **только в PAST mode** (стр. 6197), не в USER mode.
+
+**Вывод для rotate на RV1126:** VPSS rotate **не работает** ни на одном доступном device:
+- ISP device — только Scale, rotation **НЕ поддерживается** (китайский оригинал)
+- RGA device — rotate в VPSS context не документирован
+- VPSS device — недоступен на RV1126
+- VGS (rotation есть) — только PAST mode, не USER
+
+**RGA rotate напрямую (вне VPSS, через `improcess`) — единственный доказанно работающий способ.**
+
+> **Документация не покрывает RV1126B:** список поддерживаемых чипов в V2.13.3 (2024.10): RK3506, RK3308, RV1106/RV1103, RV1106B/RV1103B. **RV1126/RV1126B отсутствует** в списке, хотя упоминается в тексте. Возможно документация устаревшая или неполная для RV1126B.
 
 #### Сводная таблица: VPSS vs RGA
 
