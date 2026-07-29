@@ -844,6 +844,116 @@ RK_MPI_VO_SendFrame(voLayer, voChn, &outFrame, -1);
 
 **Статус:** гипотеза, основанная на SDK примере и строках из `librockit.so`. **Требует тестирования на плате.**
 
+#### Проверка на плате (реальные данные)
+
+Плата ожила — проверили напрямую через SSH (`ssh rock`):
+
+**1. Аппаратный VPSS блок есть и включён** (`/proc/device-tree/vpss@21d20000/`):
+```
+compatible = "rockchip,rv1126b-rkvpss"
+status = "okay"
+```
+Адрес `0x21d20000` совпадает с TRM. Прерывания работают:
+```
+128: ... GICv2 194 Level  rkvpss_hw
+129: ... GICv2 193 Level  rkvpss_hw
+```
+
+**2. Два виртуальных VPSS устройства** (по одному на сенсор):
+```
+/dev/mpi/rkvpss-vir0   # сенсор 0
+/dev/mpi/rkvpss-vir1   # сенсор 1
+```
+
+**3. Media topology** (`media-ctl -d /dev/media4 -p`):
+```
+driver: rkvpss-vir0
+model:  rkvpss0
+rkvpss-subdev (2 pads, 7 links)
+  ├─ rkvpss_scale0 [ENABLED]   # /dev/video39
+  ├─ rkvpss_scale1 [ENABLED]   # /dev/video40
+  ├─ rkvpss_scale2 [ENABLED]   # /dev/video41
+  ├─ rkvpss_scale3 [ENABLED]   # /dev/video42
+  ├─ rkvpss_scale4 [ENABLED]   # /dev/video43
+  └─ rkvpss_scale5 [ENABLED]   # /dev/video44
+```
+**6 каналов** на каждый сенсор — совпадает с `VPSS_MAX_CHN_NUM = 6` из `rk_defines.h`.
+
+**4. `rkvpss-offline` устройства НЕТ на плате:**
+```
+/dev/mpi/ — только rkvpss-vir0, rkvpss-vir1 (нет rkvpss-offline)
+/proc/device-tree/ — только vpss@21d20000, rkvpss-vir0, rkvpss-vir1
+```
+Но в `librockit.so` есть строки `rkvpss-offline` и `findVpssOfflineDev` — это **логическое имя** внутри rockit, не device-tree устройство. Rockit ищет offline устройство через `/sys/class/video4linux/` по имени.
+
+**5. Online/offline параметр ядра:**
+```
+/sys/module/video_rkisp/parameters/m_online = N,N,N,N,N,N,N,N
+```
+Все 8 параметров = `N` (offline). Но это параметр ISP, не VPSS.
+
+**6. GDC устройство есть:**
+```
+/dev/mpi/gdc
+```
+GDC доступен — может делать rotate.
+
+**7. Все MPI устройства:**
+```
+/dev/mpi/: aiisp avs gdc ivs rkcif-mipi-lvds rkcif-mipi-lvds2
+           rkisp-vir0 rkisp-vir1 rkvpss-vir0 rkvpss-vir1
+           valloc venc vlog vpss vrga vrgn vsys vvi
+```
+
+#### Уточнённая картина: online vs offline на RV1126B
+
+**`rkvpss-vir0/1` — это и есть "online" VPSS** (встроен в ISP pipeline):
+- VI каналы `rkvpss_scale0-5` — выходы аппаратного VPSS блока
+- Кадр идёт: `Сенсор → CSI → ISP → VPSS (rkvpss-vir) → VI → приложение`
+- Rotate **НЕ работает** (`online not support rotate`)
+
+**`rkvpss-offline` — логическое устройство для offline mode** (не в device-tree):
+- Rockit ищет его через `findVpssOfflineDev` по `/sys/class/video4linux/`
+- В offline mode кадр подаётся через `RK_MPI_VPSS_SendFrame`
+- Rotate **работает** через GDC
+
+**Гипотеза:** `rkvpss-offline` — это **тот же `rkvpss-vir0/1`**, но используемый в другом режиме (через `RK_MPI_VPSS_SendFrame` вместо bind с VI). Rockit переключает VPSS блок в offline режим через `RKVPSS_CMD_MODULE_SEL` ioctl (строка `set vpss module sel failed` в librockit.so).
+
+**Параметр `mirrorCmsc`** (из `rkadk_media_comm.c:879`):
+```c
+stModParam.stExtChnParam.mirrorCmsc = 0; // 1 is for vpss offline, 0 is for vpss online(vi ext)
+```
+- `mirrorCmsc=0` (online) — VI ext channels используют `rkvpss_scale0-5` напрямую
+- `mirrorCmsc=1` (offline) — VPSS переключается в offline режим, rotate через GDC
+
+**Восстановленная схема VPSS на RV1126B:**
+
+```
+                    ┌─────────────────────────────────────┐
+                    │  Аппаратный VPSS блок (0x21d20000)  │
+                    │  rkvpss_hw (2 IRQ)                  │
+                    └────────┬────────────────────────────┘
+                             │
+                    ┌────────┴────────┐
+                    │  rkvpss-vir0/1  │  (виртуальные устройства)
+                    │  /dev/media4/5  │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┴──────────────┐
+              │                              │
+        online mode                    offline mode
+        (bind с VI)                    (SendFrame)
+        mirrorCmsc=0                   mirrorCmsc=1
+              │                              │
+              ▼                              ▼
+    rkvpss_scale0-5                 rkvpss-offline
+    (VI ext channels)               (логическое устройство)
+              │                              │
+              ▼                              ▼
+    VI → приложение                 GDC (rotate) → приложение
+    Rotate: НЕТ                     Rotate: ДА
+```
+
 #### Сводная таблица: rotate на RV1126B (восстановленная)
 
 | Способ | Режим | Работает? | Через что | Сложность |
