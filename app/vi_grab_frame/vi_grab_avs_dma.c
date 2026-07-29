@@ -55,6 +55,7 @@
 #include "rk_comm_video.h"
 #include "rk_mpi_vi.h"
 #include "rk_mpi_avs.h"
+#include "rk_mpi_vpss.h"
 #include "rk_mpi_mb.h"
 #include "rk_mpi_vo.h"
 #include "rk_mpi_sys.h"
@@ -104,6 +105,7 @@ typedef struct {
     MB_BLK panBlk[2]; /* double-buffered MMZ for pan-and-scan (VO holds one, we fill other) */
     int panIdx;     /* current buffer index (0 or 1) */
     int panBufSize; /* size of each panBlk buffer */
+    int useVpss;    /* --vpss: AVS → VPSS (bind) → GetChnFrame from VPSS */
 } app_ctx_t;
 
 static void usage(const char *prog) {
@@ -128,6 +130,7 @@ static void usage(const char *prog) {
         "  --vo-dev <N>          VO device id for --action vo (default: 0)\n"
         "  --vo-layer <N>        VO layer for --action vo (default: 1)\n"
         "  --vo-chn <N>          VO channel for --action vo (default: 0)\n"
+        "  --vpss                AVS → VPSS (bind) → GetChnFrame from VPSS (fan-out demo)\n"
         "  -v, --verbose         verbose output\n"
         "  --help                show this help\n"
         "\n"
@@ -161,6 +164,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
         {"vo-dev",     required_argument, 0, 1007},
         {"vo-layer",   required_argument, 0, 1005},
         {"vo-chn",     required_argument, 0, 1006},
+        {"vpss",        no_argument,       0, 1008},
         {"verbose", no_argument,       0, 'v'},
         {"help",    no_argument,       0, '?'},
         {0, 0, 0, 0}
@@ -216,6 +220,7 @@ static int parse_args(app_ctx_t *ctx, int argc, char **argv) {
             case 1005: ctx->voLayer = atoi(optarg); break;
             case 1006: ctx->voChn = atoi(optarg); break;
             case 1007: ctx->voDevId = atoi(optarg); break;
+            case 1008: ctx->useVpss = 1; break;
             case 'v': ctx->verbose = 1; break;
             case '?':
             default:
@@ -647,6 +652,65 @@ int main(int argc, char **argv) {
     ret = RK_MPI_AVS_StartGrp(AVS_GRP_ID);
     if (ret != RK_SUCCESS) { fprintf(stderr, "AVS_StartGrp: %#x\n", ret); goto cleanup_bind; }
 
+    /* 7a. VPSS init + Bind AVS → VPSS (if --vpss) */
+#define VPSS_GRP_AVS  10
+#define VPSS_CHN_AVS  0
+    /* helper: release frame from VPSS or AVS depending on --vpss */
+#define RELEASE_MEGA(ctx, pframe) do { \
+    if ((ctx)->useVpss) RK_MPI_VPSS_ReleaseChnFrame(VPSS_GRP_AVS, VPSS_CHN_AVS, (pframe)); \
+    else RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, (pframe)); \
+} while(0)
+    int vpss_inited = 0;
+    if (ctx.useVpss) {
+        VPSS_GRP_ATTR_S stVpssGrpAttr;
+        VPSS_CHN_ATTR_S stVpssChnAttr;
+        memset(&stVpssGrpAttr, 0, sizeof(stVpssGrpAttr));
+        memset(&stVpssChnAttr, 0, sizeof(stVpssChnAttr));
+        stVpssGrpAttr.u32MaxW = mega_w;
+        stVpssGrpAttr.u32MaxH = mega_h;
+        stVpssGrpAttr.enPixelFormat = RK_FMT_YUV420SP;
+        stVpssGrpAttr.stFrameRate.s32SrcFrameRate = -1;
+        stVpssGrpAttr.stFrameRate.s32DstFrameRate = -1;
+        stVpssGrpAttr.enCompressMode = COMPRESS_MODE_NONE;
+        stVpssGrpAttr.enVProcDev = VIDEO_PROC_DEV_VPSS;
+        ret = RK_MPI_VPSS_CreateGrp(VPSS_GRP_AVS, &stVpssGrpAttr);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VPSS_CreateGrp: %#x\n", ret); goto cleanup_bind; }
+        vpss_inited = 1;  /* group created, need cleanup on error */
+
+        stVpssChnAttr.enChnMode = VPSS_CHN_MODE_USER;
+        stVpssChnAttr.enDynamicRange = DYNAMIC_RANGE_SDR8;
+        stVpssChnAttr.enPixelFormat = RK_FMT_YUV420SP;
+        stVpssChnAttr.stFrameRate.s32SrcFrameRate = -1;
+        stVpssChnAttr.stFrameRate.s32DstFrameRate = -1;
+        stVpssChnAttr.u32Width = mega_w;   /* passthrough (no scale) */
+        stVpssChnAttr.u32Height = mega_h;
+        stVpssChnAttr.enCompressMode = COMPRESS_MODE_NONE;
+        stVpssChnAttr.u32FrameBufCnt = 4;
+        stVpssChnAttr.u32Depth = 2;
+        ret = RK_MPI_VPSS_SetChnAttr(VPSS_GRP_AVS, VPSS_CHN_AVS, &stVpssChnAttr);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VPSS_SetChnAttr: %#x\n", ret); goto cleanup_vpss_grp; }
+        ret = RK_MPI_VPSS_EnableChn(VPSS_GRP_AVS, VPSS_CHN_AVS);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VPSS_EnableChn: %#x\n", ret); goto cleanup_vpss_grp; }
+        ret = RK_MPI_VPSS_StartGrp(VPSS_GRP_AVS);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VPSS_StartGrp: %#x\n", ret); goto cleanup_vpss_grp; }
+        ret = RK_MPI_VPSS_SetVProcDev(VPSS_GRP_AVS, VIDEO_PROC_DEV_VPSS);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "VPSS_SetVProcDev: %#x\n", ret); goto cleanup_vpss_grp; }
+
+        /* Bind AVS → VPSS (per test_comm_sys.c:103 TEST_SYS_AvsBindVpss) */
+        MPP_CHN_S avs_out_chn, vpss_in_chn;
+        avs_out_chn.enModId = RK_ID_AVS;
+        avs_out_chn.s32DevId = AVS_GRP_ID;
+        avs_out_chn.s32ChnId = AVS_CHN_ID;
+        vpss_in_chn.enModId = RK_ID_VPSS;
+        vpss_in_chn.s32DevId = VPSS_GRP_AVS;
+        vpss_in_chn.s32ChnId = 0;
+        ret = RK_MPI_SYS_Bind(&avs_out_chn, &vpss_in_chn);
+        if (ret != RK_SUCCESS) { fprintf(stderr, "Bind AVS→VPSS: %#x\n", ret); goto cleanup_vpss_grp; }
+        if (ctx.verbose) printf("VPSS: grp=%d OK, AVS[%d,%d] → VPSS[%d,%d] bound (passthrough %dx%d)\n",
+                                VPSS_GRP_AVS, AVS_GRP_ID, AVS_CHN_ID, VPSS_GRP_AVS, VPSS_CHN_AVS,
+                                mega_w, mega_h);
+    }
+
     /* 7b. VO init (only if --action vo) — DSI display 720x1280, layer 1, VO_INTF_MIPI */
     if (ctx.action == ACTION_VO) {
         VO_PUB_ATTR_S VoPubAttr;
@@ -740,9 +804,12 @@ int main(int argc, char **argv) {
         static long long t_prev_start = 0;
         static long long t_prev_pts = 0;
         long long t_start = get_now_ms();
-        ret = RK_MPI_AVS_GetChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame, ctx.timeoutMs);
+        if (ctx.useVpss)
+            ret = RK_MPI_VPSS_GetChnFrame(VPSS_GRP_AVS, VPSS_CHN_AVS, &stMegaFrame, ctx.timeoutMs);
+        else
+            ret = RK_MPI_AVS_GetChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame, ctx.timeoutMs);
         if (ret != RK_SUCCESS) {
-            fprintf(stderr, "Frame %d: AVS_GetChnFrame failed: %#x\n", frame, ret);
+            fprintf(stderr, "Frame %d: GetChnFrame failed: %#x\n", frame, ret);
             continue;
         }
         long long t_grab = get_now_ms() - t_start;
@@ -756,7 +823,7 @@ int main(int argc, char **argv) {
 
         if (frame < ctx.skipFrames) {
             if (ctx.verbose) printf("Frame %d [skip]: pts=%lldus grab=%lldms\n", frame, pts_us, t_grab);
-            RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+            RELEASE_MEGA(&ctx, &stMegaFrame);
             continue;
         }
 
@@ -780,7 +847,7 @@ int main(int argc, char **argv) {
                     RK_S32 rc = RK_MPI_MMZ_Alloc(&ctx.panBlk[b], psize, 0);  /* non-cacheable */
                     if (rc != RK_SUCCESS) {
                         fprintf(stderr, "  MMZ_Alloc pan[%d] failed: %#x\n", b, rc);
-                        RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+                        RELEASE_MEGA(&ctx, &stMegaFrame);
                         goto cleanup_bind;
                     }
                 }
@@ -796,7 +863,7 @@ int main(int argc, char **argv) {
                                  cur_blk, &pan_w, &pan_h);
             if (ret) {
                 fprintf(stderr, "  rga_pan_to_mmz failed\n");
-                RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+                RELEASE_MEGA(&ctx, &stMegaFrame);
                 continue;
             }
             send_mmz_to_vo(cur_blk, pan_w, pan_h,
@@ -812,7 +879,7 @@ int main(int argc, char **argv) {
                                    out_fds, out_vas, &out_w, &out_h, ctx.verbose);
             if (ret) {
                 fprintf(stderr, "  rga_split_to_dma failed\n");
-                RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+                RELEASE_MEGA(&ctx, &stMegaFrame);
                 continue;
             }
             osize = out_w * out_h * 3 / 2;
@@ -834,7 +901,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        RK_MPI_AVS_ReleaseChnFrame(AVS_GRP_ID, AVS_CHN_ID, &stMegaFrame);
+        RELEASE_MEGA(&ctx, &stMegaFrame);
         long long t_act = get_now_ms() - t_act_start;
         if (ctx.verbose && (saved % 10 == 0))
             printf("  [act] frame %d: act=%lldms (rga+vo/save)\n", frame, t_act);
@@ -843,6 +910,16 @@ int main(int argc, char **argv) {
     printf("Done: skipped=%d, processed=%d/%d (action=%s)\n",
            ctx.skipFrames, saved, ctx.frameCount, action_str);
 
+cleanup_vpss_grp:
+    if (vpss_inited) {
+        MPP_CHN_S avs_out_chn, vpss_in_chn;
+        avs_out_chn.enModId = RK_ID_AVS; avs_out_chn.s32DevId = AVS_GRP_ID; avs_out_chn.s32ChnId = AVS_CHN_ID;
+        vpss_in_chn.enModId = RK_ID_VPSS; vpss_in_chn.s32DevId = VPSS_GRP_AVS; vpss_in_chn.s32ChnId = 0;
+        RK_MPI_SYS_UnBind(&avs_out_chn, &vpss_in_chn);
+        RK_MPI_VPSS_StopGrp(VPSS_GRP_AVS);
+        RK_MPI_VPSS_DisableChn(VPSS_GRP_AVS, VPSS_CHN_AVS);
+        RK_MPI_VPSS_DestroyGrp(VPSS_GRP_AVS);
+    }
 cleanup_bind:
     for (int b = 0; b < 2; b++) {
         if (ctx.panBlk[b]) { RK_MPI_MMZ_Free(ctx.panBlk[b]); ctx.panBlk[b] = NULL; }

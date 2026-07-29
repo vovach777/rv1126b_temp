@@ -511,51 +511,20 @@ static int draw_rect(MB_BLK blk, int w, int h, int inset, int thickness, int cam
  * GetChnFrame делается из VPSS вместо VI.
  */
 static int vpss_init(app_ctx_t *app) {
-    /* If --vpss-rotate: set mirrorCmsc=1 to switch VI ext channels to offline mode.
-     * Per rkadk_media_comm.c:879: "1 is for vpss offline, 0 is for vpss online(vi ext)"
-     * VPSS rotate only works in offline mode (per librockit.so: "online not support rotate"). */
-    if (app->vpssRotate) {
-        VI_PARAM_MOD_S stModParam;
-        memset(&stModParam, 0, sizeof(stModParam));
-        stModParam.enViModType = VI_EXT_CHN_MODE;
-        stModParam.stExtChnParam.mirrorCmsc = 1;  /* offline mode */
-        int r = RK_MPI_VI_SetModParam(&stModParam);
-        if (r != RK_SUCCESS)
-            fprintf(stderr, "vpss: VI_SetModParam(mirrorCmsc=1) failed: %#x\n", r);
-        else if (app->verbose)
-            printf("vpss: VI mirrorCmsc=1 (offline mode) for rotate\n");
-    }
-
     for (int i = 0; i < NUM_SENSORS; i++) {
         int grp = VPSS_GRP_BASE + i;
-        /* При --vpss-rotate + ACTION_VO: VPSS rotate 90° без scale.
-         * Тест: оставляем sensor size (1920×1080), VPSS должен крутить.
-         * RGA потом scale → display (720×1280).
-         * При --vpss-scale + ACTION_VO: VPSS scale до pre-rotate (1280×720), RGA rotate.
-         * Иначе: passthrough (sensor size). */
         int chn_w = app->sensors[i].width;
         int chn_h = app->sensors[i].height;
-        if (app->vpssScale && app->action == ACTION_VO && app->voDispW > 0) {
-            chn_w = app->voDispH;  /* 1280 (landscape pre-rotate) */
-            chn_h = app->voDispW;  /* 720  (landscape pre-rotate) */
-        }
-        /* Offline + rotate: VPSS output is rotated (W↔H swapped).
-         * If rotate 90° on 1920×1080 input → output 1080×1920.
-         * But VPSS may handle swap internally — test both ways. */
-        if (app->vpssOffline && app->vpssRotate) {
-            /* Don't swap — let VPSS handle it internally via SetGrpRotation */
-        }
 
         VPSS_GRP_ATTR_S gattr;
         memset(&gattr, 0, sizeof(gattr));
-        /* maxW/maxH must accommodate both input AND output (rotated) dimensions */
-        gattr.u32MaxW = app->sensors[i].width > chn_w ? app->sensors[i].width : chn_w;
-        gattr.u32MaxH = app->sensors[i].height > chn_h ? app->sensors[i].height : chn_h;
+        gattr.u32MaxW = chn_w;
+        gattr.u32MaxH = chn_h;
         gattr.enPixelFormat = RK_FMT_YUV420SP;
         gattr.stFrameRate.s32SrcFrameRate = -1;
         gattr.stFrameRate.s32DstFrameRate = -1;
         gattr.enCompressMode = COMPRESS_MODE_NONE;
-        gattr.enVProcDev = VIDEO_PROC_DEV_VPSS;  /* also set via SetVProcDev after StartGrp */
+        gattr.enVProcDev = VIDEO_PROC_DEV_VPSS;
 
         int ret = RK_MPI_VPSS_CreateGrp(grp, &gattr);
         if (ret != RK_SUCCESS) {
@@ -567,12 +536,10 @@ static int vpss_init(app_ctx_t *app) {
         memset(&cattr, 0, sizeof(cattr));
         cattr.enChnMode = VPSS_CHN_MODE_USER;
         cattr.enDynamicRange = DYNAMIC_RANGE_SDR8;
-        /* При --vpss-rotate: VO+RGA конвертирует NV12→BGRA, VPSS отдаёт NV12.
-         * Иначе: NV12 (RGA потом конвертирует). */
         cattr.enPixelFormat = RK_FMT_YUV420SP;
         cattr.stFrameRate.s32SrcFrameRate = -1;
         cattr.stFrameRate.s32DstFrameRate = -1;
-        cattr.u32Width = chn_w;
+        cattr.u32Width = chn_w;   /* passthrough — same as input */
         cattr.u32Height = chn_h;
         cattr.enCompressMode = COMPRESS_MODE_NONE;
         cattr.u32FrameBufCnt = 4;
@@ -583,90 +550,40 @@ static int vpss_init(app_ctx_t *app) {
             fprintf(stderr, "vpss: SetChnAttr[%d] failed: %#x\n", grp, ret);
             return -1;
         }
-
-        /* VPSS rotate 90° — BEFORE EnableChn (per rkipc RV1126 video.c:1642).
-         * Try RGA device (rkipc RV1126 uses VIDEO_PROC_DEV_RGA for rotate). */
-        if (app->vpssRotate) {
-            /* Try SetChnRotation first */
-            ret = RK_MPI_VPSS_SetChnRotation(grp, VPSS_CHN_ID, ROTATION_90);
-            if (ret != RK_SUCCESS) {
-                fprintf(stderr, "vpss: SetChnRotation[%d] failed: %#x\n", grp, ret);
-                return -1;
-            }
-            /* Also try SetChnRotationEx (GDC, arbitrary angle) */
-            VPSS_ROTATION_EX_ATTR_S rotEx;
-            memset(&rotEx, 0, sizeof(rotEx));
-            rotEx.bEnable = RK_TRUE;
-            rotEx.stRotationEx.u32Angle = 90;
-            ret = RK_MPI_VPSS_SetChnRotationEx(grp, VPSS_CHN_ID, &rotEx);
-            if (ret != RK_SUCCESS) {
-                fprintf(stderr, "vpss: SetChnRotationEx[%d] failed: %#x\n", grp, ret);
-            } else if (app->verbose) {
-                printf("vpss: grp[%d] ChnRotationEx=90 set\n", grp);
-            }
-            if (app->verbose)
-                printf("vpss: grp[%d] ChnRotation=90 set (before EnableChn)\n", grp);
-        }
-
         ret = RK_MPI_VPSS_EnableChn(grp, VPSS_CHN_ID);
         if (ret != RK_SUCCESS) {
             fprintf(stderr, "vpss: EnableChn[%d] failed: %#x\n", grp, ret);
             return -1;
         }
-
-        /* EnableBackupFrame — per rkipc RV1126 video.c:1653 (needed for rotate) */
-        if (app->vpssRotate) {
-            ret = RK_MPI_VPSS_EnableBackupFrame(grp);
-            if (ret != RK_SUCCESS) {
-                fprintf(stderr, "vpss: EnableBackupFrame[%d] failed: %#x\n", grp, ret);
-                return -1;
-            }
-            if (app->verbose)
-                printf("vpss: grp[%d] BackupFrame enabled\n", grp);
-        }
-
         ret = RK_MPI_VPSS_StartGrp(grp);
         if (ret != RK_SUCCESS) {
             fprintf(stderr, "vpss: StartGrp[%d] failed: %#x\n", grp, ret);
             return -1;
         }
-
-        /* SetVProcDev — RGA device (per rkipc RV1126 video.c:1658, rotate works with RGA) */
-        VIDEO_PROC_DEV_TYPE_E vproc = app->vpssRotate ? VIDEO_PROC_DEV_RGA : VIDEO_PROC_DEV_VPSS;
-        ret = RK_MPI_VPSS_SetVProcDev(grp, vproc);
+        ret = RK_MPI_VPSS_SetVProcDev(grp, VIDEO_PROC_DEV_VPSS);
         if (ret != RK_SUCCESS) {
             fprintf(stderr, "vpss: SetVProcDev[%d] failed: %#x\n", grp, ret);
             return -1;
         }
-        if (app->verbose)
-            printf("vpss: grp[%d] VProcDev=%d\n", grp, vproc);
 
-        if (app->vpssOffline) {
-            /* Offline mode: NO bind with VI. Frames fed via SendFrame.
-             * Rotate works in offline mode via GDC. */
-            if (app->verbose)
-                printf("vpss: grp[%d] OFFLINE mode (no VI bind, SendFrame), out %dx%d\n",
-                        grp, chn_w, chn_h);
-        } else {
-            /* Online mode: Bind VI[pipeId, chnId] → VPSS[grp, 0] */
-            MPP_CHN_S vi_chn, vpss_in;
-            vi_chn.enModId = RK_ID_VI;
-            vi_chn.s32DevId = app->sensors[i].devId;
-            vi_chn.s32ChnId = app->sensors[i].channelId;
-            vpss_in.enModId = RK_ID_VPSS;
-            vpss_in.s32DevId = grp;
-            vpss_in.s32ChnId = 0;
-            ret = RK_MPI_SYS_Bind(&vi_chn, &vpss_in);
-            if (ret != RK_SUCCESS) {
-                fprintf(stderr, "vpss: Bind VI[%d] -> VPSS[%d] failed: %#x\n",
-                        app->sensors[i].devId, grp, ret);
-                return -1;
-            }
-            if (app->verbose)
-                printf("vpss: grp[%d] OK, VI[%d,%d] -> VPSS[%d,0] bound (out %dx%d)\n",
-                        grp, app->sensors[i].devId, app->sensors[i].channelId,
-                        grp, chn_w, chn_h);
+        /* Online mode: Bind VI[pipeId, chnId] → VPSS[grp, 0] */
+        MPP_CHN_S vi_chn, vpss_in;
+        vi_chn.enModId = RK_ID_VI;
+        vi_chn.s32DevId = app->sensors[i].devId;
+        vi_chn.s32ChnId = app->sensors[i].channelId;
+        vpss_in.enModId = RK_ID_VPSS;
+        vpss_in.s32DevId = grp;
+        vpss_in.s32ChnId = 0;
+        ret = RK_MPI_SYS_Bind(&vi_chn, &vpss_in);
+        if (ret != RK_SUCCESS) {
+            fprintf(stderr, "vpss: Bind VI[%d] -> VPSS[%d] failed: %#x\n",
+                    app->sensors[i].devId, grp, ret);
+            return -1;
         }
+        if (app->verbose)
+            printf("vpss: grp[%d] OK, VI[%d,%d] -> VPSS[%d,0] bound (out %dx%d)\n",
+                    grp, app->sensors[i].devId, app->sensors[i].channelId,
+                    grp, chn_w, chn_h);
     }
     return 0;
 }
@@ -674,55 +591,22 @@ static int vpss_init(app_ctx_t *app) {
 static void vpss_deinit(app_ctx_t *app) {
     for (int i = 0; i < NUM_SENSORS; i++) {
         int grp = VPSS_GRP_BASE + i;
-        if (!app->vpssOffline) {
-            MPP_CHN_S vi_chn, vpss_in;
-            vi_chn.enModId = RK_ID_VI;
-            vi_chn.s32DevId = app->sensors[i].devId;
-            vi_chn.s32ChnId = app->sensors[i].channelId;
-            vpss_in.enModId = RK_ID_VPSS;
-            vpss_in.s32DevId = grp;
-            vpss_in.s32ChnId = 0;
-            RK_MPI_SYS_UnBind(&vi_chn, &vpss_in);
-        }
+        MPP_CHN_S vi_chn, vpss_in;
+        vi_chn.enModId = RK_ID_VI;
+        vi_chn.s32DevId = app->sensors[i].devId;
+        vi_chn.s32ChnId = app->sensors[i].channelId;
+        vpss_in.enModId = RK_ID_VPSS;
+        vpss_in.s32DevId = grp;
+        vpss_in.s32ChnId = 0;
+        RK_MPI_SYS_UnBind(&vi_chn, &vpss_in);
         RK_MPI_VPSS_DisableChn(grp, VPSS_CHN_ID);
         RK_MPI_VPSS_StopGrp(grp);
         RK_MPI_VPSS_DestroyGrp(grp);
     }
 }
 
-/* GetChnFrame: из VPSS если --vpss, иначе из VI.
- * При --vpss-offline: VI_GetChnFrame → VPSS_SendFrame → VPSS_GetChnFrame.
- * VI кадр держится в app->viHeldFrame до release_frame. */
+/* GetChnFrame: из VPSS если --vpss, иначе из VI. */
 static int get_frame(app_ctx_t *app, int sensor_idx, VIDEO_FRAME_INFO_S *vf, int timeout_ms) {
-    if (app->vpssOffline) {
-        int grp = VPSS_GRP_BASE + sensor_idx;
-        VIDEO_FRAME_INFO_S *viF = &app->viHeldFrame[sensor_idx];
-        memset(viF, 0, sizeof(*viF));
-        int ret = RK_MPI_VI_GetChnFrame(app->sensors[sensor_idx].pipeId,
-                                         app->sensors[sensor_idx].channelId,
-                                         viF, timeout_ms);
-        if (ret != RK_SUCCESS) {
-            if (app->verbose) fprintf(stderr, "  [offline] VI_GetChnFrame cam%d failed: %#x\n", sensor_idx, ret);
-            return ret;
-        }
-        /* Flush cache before SendFrame (per SDK example test_mod_vpss.cpp:328) */
-        RK_MPI_SYS_MmzFlushCache(viF->stVFrame.pMbBlk, RK_FALSE);
-        ret = RK_MPI_VPSS_SendFrame(grp, 0, viF, timeout_ms);
-        if (ret != RK_SUCCESS) {
-            if (app->verbose) fprintf(stderr, "  [offline] VPSS_SendFrame grp%d failed: %#x\n", grp, ret);
-            RK_MPI_VI_ReleaseChnFrame(app->sensors[sensor_idx].pipeId,
-                                      app->sensors[sensor_idx].channelId, viF);
-            return ret;
-        }
-        ret = RK_MPI_VPSS_GetChnFrame(grp, VPSS_CHN_ID, vf, timeout_ms);
-        if (ret != RK_SUCCESS) {
-            if (app->verbose) fprintf(stderr, "  [offline] VPSS_GetChnFrame grp%d chn%d failed: %#x\n", grp, VPSS_CHN_ID, ret);
-            RK_MPI_VI_ReleaseChnFrame(app->sensors[sensor_idx].pipeId,
-                                      app->sensors[sensor_idx].channelId, viF);
-            return ret;
-        }
-        return RK_SUCCESS;
-    }
     if (app->useVpss) {
         int grp = VPSS_GRP_BASE + sensor_idx;
         return RK_MPI_VPSS_GetChnFrame(grp, VPSS_CHN_ID, vf, timeout_ms);
@@ -733,14 +617,6 @@ static int get_frame(app_ctx_t *app, int sensor_idx, VIDEO_FRAME_INFO_S *vf, int
 }
 
 static int release_frame(app_ctx_t *app, int sensor_idx, VIDEO_FRAME_INFO_S *vf) {
-    if (app->vpssOffline) {
-        int grp = VPSS_GRP_BASE + sensor_idx;
-        int ret = RK_MPI_VPSS_ReleaseChnFrame(grp, VPSS_CHN_ID, vf);
-        RK_MPI_VI_ReleaseChnFrame(app->sensors[sensor_idx].pipeId,
-                                   app->sensors[sensor_idx].channelId,
-                                   &app->viHeldFrame[sensor_idx]);
-        return ret;
-    }
     if (app->useVpss) {
         int grp = VPSS_GRP_BASE + sensor_idx;
         return RK_MPI_VPSS_ReleaseChnFrame(grp, VPSS_CHN_ID, vf);
@@ -809,25 +685,16 @@ static int vo_init(app_ctx_t *app) {
     VoChnAttr.u32Priority = 1;
     VoChnAttr.stRect.s32X = 0;
     VoChnAttr.stRect.s32Y = 0;
-    /* When VO rotates 90°, send LANDSCAPE frame (dispH × dispW) and VO
-     * rotates to PORTRAIT (dispW × dispH). Per rkipc RV1126B (video.c:2036). */
-    if (app->voRotate) {
-        VoChnAttr.stRect.u32Width = app->voDispH;   /* landscape width */
-        VoChnAttr.stRect.u32Height = app->voDispW;  /* landscape height */
-        VoChnAttr.enRotation = ROTATION_90;
-    } else {
-        VoChnAttr.stRect.u32Width = app->voDispW;
-        VoChnAttr.stRect.u32Height = app->voDispH;
-        VoChnAttr.enRotation = ROTATION_0;
-    }
+    VoChnAttr.stRect.u32Width = app->voDispW;
+    VoChnAttr.stRect.u32Height = app->voDispH;
+    VoChnAttr.enRotation = ROTATION_0;
     ret = RK_MPI_VO_SetChnAttr(app->voLayer, app->voChn, &VoChnAttr);
     if (ret != RK_SUCCESS) { fprintf(stderr, "VO_SetChnAttr: %#x\n", ret); return -1; }
     ret = RK_MPI_VO_EnableChn(app->voLayer, app->voChn);
     if (ret != RK_SUCCESS) { fprintf(stderr, "VO_EnableChn: %#x\n", ret); return -1; }
 
-    printf("VO: layer=%d dev=%d chn=%d enabled (%dx%d DSI, rotation=%d)\n",
-           app->voLayer, app->voDevId, app->voChn, app->voDispW, app->voDispH,
-           app->voRotate ? 90 : 0);
+    printf("VO: layer=%d dev=%d chn=%d enabled (%dx%d DSI)\n",
+           app->voLayer, app->voDevId, app->voChn, app->voDispW, app->voDispH);
     return 0;
 }
 
@@ -1029,24 +896,13 @@ int main(int argc, char **argv) {
             int vh = stViFrame.stVFrame.u32VirHeight;
             long long pts_us = (long long)stViFrame.stVFrame.u64PTS;
 
-            /* RGA → MMZ.
-             * --vo-rotate: RGA does scale only (landscape), VO does rotate 90°.
-             * Otherwise: RGA does scale+rotate. */
+            /* RGA scale+rotate → MMZ (portrait) */
             MB_BLK cur_blk = app.panBlk[app.panIdx];
             app.panIdx ^= 1;
-            if (app.voRotate) {
-                /* RGA scale to landscape (dispH × dispW), VO rotates to portrait */
-                ret = rga_scale_to_mmz(stViFrame.stVFrame.pMbBlk, w, h,
-                                       vw, vh,
-                                       app.voDispH, app.voDispW,  /* landscape */
-                                       app.verbose, cur_blk);
-            } else {
-                /* RGA scale+rotate to portrait (dispW × dispH) */
-                ret = rga_scale_rotate_to_mmz(stViFrame.stVFrame.pMbBlk, w, h,
-                                              vw, vh,
-                                              app.voDispW, app.voDispH,
-                                              app.verbose, cur_blk);
-            }
+            ret = rga_scale_rotate_to_mmz(stViFrame.stVFrame.pMbBlk, w, h,
+                                          vw, vh,
+                                          app.voDispW, app.voDispH,
+                                          app.verbose, cur_blk);
             if (ret) {
                 fprintf(stderr, "  rga failed\n");
                 release_frame(&app, cur_cam, &stViFrame);
@@ -1055,16 +911,12 @@ int main(int argc, char **argv) {
 
             /* Опциональная рамка цвета камеры (--rect) */
             if (app.rectEnabled) {
-                int rw = app.voRotate ? app.voDispH : app.voDispW;
-                int rh = app.voRotate ? app.voDispW : app.voDispH;
-                draw_rect(cur_blk, rw, rh,
+                draw_rect(cur_blk, app.voDispW, app.voDispH,
                           app.rectInset, app.rectThick, cur_cam);
             }
 
-            /* Отправить в VO (landscape if voRotate, VO rotates to portrait) */
-            int send_w = app.voRotate ? app.voDispH : app.voDispW;
-            int send_h = app.voRotate ? app.voDispW : app.voDispH;
-            send_mmz_to_vo(cur_blk, send_w, send_h,
+            /* Отправить в VO */
+            send_mmz_to_vo(cur_blk, app.voDispW, app.voDispH,
                            app.voLayer, app.voChn, pts_us);
 
             release_frame(&app, cur_cam, &stViFrame);
