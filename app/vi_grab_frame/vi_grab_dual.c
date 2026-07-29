@@ -511,6 +511,21 @@ static int draw_rect(MB_BLK blk, int w, int h, int inset, int thickness, int cam
  * GetChnFrame делается из VPSS вместо VI.
  */
 static int vpss_init(app_ctx_t *app) {
+    /* If --vpss-rotate: set mirrorCmsc=1 to switch VI ext channels to offline mode.
+     * Per rkadk_media_comm.c:879: "1 is for vpss offline, 0 is for vpss online(vi ext)"
+     * VPSS rotate only works in offline mode (per librockit.so: "online not support rotate"). */
+    if (app->vpssRotate) {
+        VI_PARAM_MOD_S stModParam;
+        memset(&stModParam, 0, sizeof(stModParam));
+        stModParam.enViModType = VI_EXT_CHN_MODE;
+        stModParam.stExtChnParam.mirrorCmsc = 1;  /* offline mode */
+        int r = RK_MPI_VI_SetModParam(&stModParam);
+        if (r != RK_SUCCESS)
+            fprintf(stderr, "vpss: VI_SetModParam(mirrorCmsc=1) failed: %#x\n", r);
+        else if (app->verbose)
+            printf("vpss: VI mirrorCmsc=1 (offline mode) for rotate\n");
+    }
+
     for (int i = 0; i < NUM_SENSORS; i++) {
         int grp = VPSS_GRP_BASE + i;
         /* При --vpss-rotate + ACTION_VO: VPSS rotate 90° без scale.
@@ -568,10 +583,46 @@ static int vpss_init(app_ctx_t *app) {
             fprintf(stderr, "vpss: SetChnAttr[%d] failed: %#x\n", grp, ret);
             return -1;
         }
+
+        /* VPSS rotate 90° — BEFORE EnableChn (per rkipc RV1126 video.c:1642).
+         * Try RGA device (rkipc RV1126 uses VIDEO_PROC_DEV_RGA for rotate). */
+        if (app->vpssRotate) {
+            /* Try SetChnRotation first */
+            ret = RK_MPI_VPSS_SetChnRotation(grp, VPSS_CHN_ID, ROTATION_90);
+            if (ret != RK_SUCCESS) {
+                fprintf(stderr, "vpss: SetChnRotation[%d] failed: %#x\n", grp, ret);
+                return -1;
+            }
+            /* Also try SetChnRotationEx (GDC, arbitrary angle) */
+            VPSS_ROTATION_EX_ATTR_S rotEx;
+            memset(&rotEx, 0, sizeof(rotEx));
+            rotEx.bEnable = RK_TRUE;
+            rotEx.stRotationEx.u32Angle = 90;
+            ret = RK_MPI_VPSS_SetChnRotationEx(grp, VPSS_CHN_ID, &rotEx);
+            if (ret != RK_SUCCESS) {
+                fprintf(stderr, "vpss: SetChnRotationEx[%d] failed: %#x\n", grp, ret);
+            } else if (app->verbose) {
+                printf("vpss: grp[%d] ChnRotationEx=90 set\n", grp);
+            }
+            if (app->verbose)
+                printf("vpss: grp[%d] ChnRotation=90 set (before EnableChn)\n", grp);
+        }
+
         ret = RK_MPI_VPSS_EnableChn(grp, VPSS_CHN_ID);
         if (ret != RK_SUCCESS) {
             fprintf(stderr, "vpss: EnableChn[%d] failed: %#x\n", grp, ret);
             return -1;
+        }
+
+        /* EnableBackupFrame — per rkipc RV1126 video.c:1653 (needed for rotate) */
+        if (app->vpssRotate) {
+            ret = RK_MPI_VPSS_EnableBackupFrame(grp);
+            if (ret != RK_SUCCESS) {
+                fprintf(stderr, "vpss: EnableBackupFrame[%d] failed: %#x\n", grp, ret);
+                return -1;
+            }
+            if (app->verbose)
+                printf("vpss: grp[%d] BackupFrame enabled\n", grp);
         }
 
         ret = RK_MPI_VPSS_StartGrp(grp);
@@ -580,32 +631,15 @@ static int vpss_init(app_ctx_t *app) {
             return -1;
         }
 
-        /* SetVProcDev AFTER StartGrp (per SDK example test_mod_vpss.cpp) */
-        ret = RK_MPI_VPSS_SetVProcDev(grp, VIDEO_PROC_DEV_VPSS);
+        /* SetVProcDev — RGA device (per rkipc RV1126 video.c:1658, rotate works with RGA) */
+        VIDEO_PROC_DEV_TYPE_E vproc = app->vpssRotate ? VIDEO_PROC_DEV_RGA : VIDEO_PROC_DEV_VPSS;
+        ret = RK_MPI_VPSS_SetVProcDev(grp, vproc);
         if (ret != RK_SUCCESS) {
             fprintf(stderr, "vpss: SetVProcDev[%d] failed: %#x\n", grp, ret);
             return -1;
         }
-
-        /* VPSS rotate 90° — AFTER StartGrp (per SDK example).
-         * In offline mode rotate works via GDC.
-         * Use SetGrpRotation (input rotate) + SetChnRotation (output rotate). */
-        if (app->vpssRotate) {
-            ret = RK_MPI_VPSS_SetGrpRotation(grp, ROTATION_90);
-            if (ret != RK_SUCCESS) {
-                fprintf(stderr, "vpss: SetGrpRotation[%d] failed: %#x\n", grp, ret);
-                return -1;
-            }
-            if (app->verbose)
-                printf("vpss: grp[%d] GrpRotation=90 enabled\n", grp);
-            ret = RK_MPI_VPSS_SetChnRotation(grp, VPSS_CHN_ID, ROTATION_90);
-            if (ret != RK_SUCCESS) {
-                fprintf(stderr, "vpss: SetChnRotation[%d] failed: %#x\n", grp, ret);
-                return -1;
-            }
-            if (app->verbose)
-                printf("vpss: grp[%d] ChnRotation=90 enabled\n", grp);
-        }
+        if (app->verbose)
+            printf("vpss: grp[%d] VProcDev=%d\n", grp, vproc);
 
         if (app->vpssOffline) {
             /* Offline mode: NO bind with VI. Frames fed via SendFrame.
