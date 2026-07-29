@@ -631,6 +631,120 @@ RK_MPI_VGS_EndJob(hHandle);
 
 > **Документация не покрывает RV1126B:** список поддерживаемых чипов в V2.13.3 (2024.10): RK3506, RK3308, RV1106/RV1103, RV1106B/RV1103B. **RV1126/RV1126B отсутствует** в списке, хотя упоминается в тексте. Возможно документация устаревшая или неполная для RV1126B.
 
+#### Восстановленная картина VPSS на RV1126B (из SDK-первоисточников)
+
+Поскольку документация скомпрометирована (неверный английский перевод + RV1126B отсутствует в списке), картина восстановлена из **первоисточников SDK**:
+
+**1. `rk_defines.h` — автоматически сгенерированный конфиг** (`external/rockit/lib/arm64/rv1126b/rk_defines.h`):
+
+```c
+/* Automatic generated [rv1126b] config */
+#define VPSS_MAX_GRP_NUM               256
+#define VPSS_MAX_CHN_NUM               6
+#define VPSS_VIDEO_PROC_DEVICE_TYPE    3   /* ← VIDEO_PROC_DEV_VPSS */
+```
+
+Сравнение по чипам (`VPSS_VIDEO_PROC_DEVICE_TYPE`):
+
+| Чип | Значение | Device по умолчанию |
+|-----|----------|---------------------|
+| RK3308 | 1 | RGA |
+| RK3506 | 1 | RGA |
+| RV1106 | 1 | RGA |
+| **RV1126B (arm32)** | **3** | **VPSS** |
+| **RV1126B (arm64)** | **3** | **VPSS** |
+| RK3588 | 0 | GPU |
+
+**RV1126B — единственный чип с `VIDEO_PROC_DEV_VPSS` (3) по умолчанию.** Аппаратный VPSS блок на RV1126B **есть** и используется по умолчанию.
+
+**2. `librockit.so` — строки ошибок** (извлечены `strings` из `external/rockit/lib/arm64/rv1126b/linux/librockit.so`):
+
+Ключевые находки:
+- **`online not support rotate.`** — online mode не поддерживает rotate
+- **`online not support mirror.`** — online mode не поддерживает mirror
+- **`rkvpss-offline`** — есть offline устройство VPSS
+- **`findVpssOfflineDev`** — функция поиска offline устройства
+- **`/dev/mpi/gdc`** + **`create gdc failed for chn(%d)`** — **GDC используется для rotate**
+- **`set grp[%d] rotation[%d] failed`** / **`VPSS[%d] set rotation[%d] failed`** — rotate API есть
+- **`Handle:%d enVProcDev:%d is not support`** — проверка device с fallback
+- **`/sys/module/video_rkisp/parameters/m_online`** — параметр ядра online/offline
+
+**3. `rkadk_media_comm.c` — комментарий Rockchip** (`external/rockit/mpi/sdk/include/...`, строка 879):
+
+```c
+stModParam.stExtChnParam.mirrorCmsc = 0; // 1 is for vpss offline, 0 is for vpss online(vi ext)
+```
+
+**Подтверждение:** на RV1126B есть **два режима VPSS**:
+- **online** (`mirrorCmsc=0`, по умолчанию) — VPSS работает через VI ext channels
+- **offline** (`mirrorCmsc=1`) — VPSS работает через отдельное offline устройство `rkvpss-offline`
+
+**4. `rk_mpi_vpss.h` — API rotate** (`external/rockit/mpi/sdk/include/rk_mpi_vpss.h`):
+
+```c
+RK_S32 RK_MPI_VPSS_SetGrpRotation(VPSS_GRP VpssGrp, ROTATION_E enRotation);        // 0/90/180/270
+RK_S32 RK_MPI_VPSS_SetChnRotation(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, ROTATION_E enRotation);
+RK_S32 RK_MPI_VPSS_SetChnRotationEx(VPSS_GRP VpssGrp, VPSS_CHN VpssChn,
+            const VPSS_ROTATION_EX_ATTR_S* pstRotationExAttr);  // произвольный угол 0-360
+```
+
+**`SetChnRotationEx`** — rotate на **произвольный угол** (0-360) через GDC, с distortion center и dest size (`ROTATION_EX_S` в `rk_comm_video.h:623-640`).
+
+**5. rkadk ini — реальные имена устройств** (`external/rockit/mpi/sdk/include/...`, `app/rkadk/inicfg/rv1126b/rkadk_setting_sensor_0.ini`):
+
+```ini
+[vi.0] device_name = rkvpss_scale0   # VI канал 0 — выход аппаратного VPSS
+[vi.1] device_name = rkvpss_scale1   # VI канал 1
+[vi.2] device_name = rkvpss_scale2   # VI канал 2
+[vi.3] device_name = rkvpss_scale3   # VI канал 3
+```
+
+`rkvpss_scale0/1/2/3` — выходы **аппаратного VPSS блока**, встроенного в ISP pipeline.
+
+#### Восстановленная картина: как работает VPSS на RV1126B
+
+**Два разных "VPSS":**
+
+| Что | Где | Управление | Rotate? |
+|-----|-----|-----------|---------|
+| **Аппаратный VPSS блок** (`rkvpss_scale0-3`) | Встроен в ISP pipeline, между ISP и VI | Через device-tree/media-ctl | **нет** (это VI каналы) |
+| **Программный VPSS модуль rockit** (`RK_MPI_VPSS_*`) | Менеджер в `librockit.so` | Через MPI API | **зависит от mode** |
+
+**Режимы программного VPSS модуля:**
+
+| Режим | Как включается | Rotate | Mirror | Что использует |
+|-------|---------------|--------|--------|----------------|
+| **online** (по умолчанию) | `mirrorCmsc=0` | **НЕТ** | **НЕТ** | VI ext channels (аппаратный VPSS блок) |
+| **offline** | `mirrorCmsc=1` | **ДА** (через GDC) | **ДА** | `rkvpss-offline` устройство + GDC |
+
+**Почему наш тест `--vpss-rotate` не сработал:**
+
+Наш код (`vi_grab_dual.c:521`) использует `VIDEO_PROC_DEV_VPSS` в **online mode** (по умолчанию). В online mode:
+- `SetChnRotation(90)` → rockit логирует `online not support rotate.` → rotate игнорируется
+- Кадр проходит через VI ext channels (аппаратный VPSS блок) без rotate
+- RGA потом делает scale на неправильный размер → искажение
+
+**Чтобы VPSS rotate заработал, нужно:**
+1. Переключить VPSS в **offline mode** (`mirrorCmsc=1` через `RK_MPI_VI_SetModParam`)
+2. Использовать `rkvpss-offline` устройство
+3. Тогда `SetChnRotation(90)` будет использовать GDC для rotate
+
+**Но это сложнее** чем RGA напрямую — нужно менять режим VI, что может повлиять на другие каналы.
+
+#### Сводная таблица: rotate на RV1126B (восстановленная)
+
+| Способ | Режим | Работает? | Через что | Сложность |
+|--------|-------|-----------|-----------|-----------|
+| **RGA напрямую** (`improcess`) | любой | **да** ✓ | RGA hardware | низкая |
+| **VGS напрямую** (`RK_MPI_VGS_*`) | любой | да (в SDK) | VGS hardware | средняя |
+| **VPSS `SetChnRotation`** | online | **НЕТ** | — | — |
+| **VPSS `SetChnRotation`** | offline | **да** (теоретически) | GDC hardware | высокая |
+| **VPSS `SetChnRotationEx`** | offline | да (произвольный угол) | GDC hardware | высокая |
+| **VPSS `SetGrpRotation`** | offline | да (теоретически) | GDC hardware | высокая |
+
+**Текущий выбор:** RGA напрямую — доказанно работает, просто, не требует смены режима VI.
+**Альтернатива для будущего:** VPSS offline + GDC rotate — аппаратно, без RGA, но требует переключения режима.
+
 #### Сводная таблица: VPSS vs RGA
 
 | Критерий | **VPSS** | **RGA** |
