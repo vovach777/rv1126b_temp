@@ -1,0 +1,80 @@
+unknown(0): QCommandLineParser: call process() or parse() before isSet
+unknown(0): QCommandLineParser: call process() or parse() before isSet
+unknown(0): set face_rect = true
+unknown(0): create ("Video")
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onS30Connected  true
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )
+unknown(0): create ("Password")
+unknown(0): ~SVideo
+unknown(0): setVideoFrame  false true
+unknown(0): ~Fragment()
+unknown(0): ~AcessMode()
+unknown(0): Fragment() is_video= false
+unknown(0): BarClock QRectF(0,10 800x114)
+unknown(0): 240 140 QPointF(40,685) QRectF(40,685 720x563)
+unknown(0): BarClock click
+unknown(0): create ("Video")
+unknown(0): ~Fragment()
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )
+unknown(0): create ("Password")
+unknown(0): ~SVideo
+unknown(0): setVideoFrame  false true
+unknown(0): ~Fragment()
+unknown(0): ~AcessMode()
+unknown(0): Fragment() is_video= false
+unknown(0): BarClock QRectF(0,10 800x114)
+unknown(0): 240 140 QPointF(40,685) QRectF(40,685 720x563)
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "6"
+unknown(0): onKey  "6"
+unknown(0): onKey  "6"
+unknown(0): onKey  "6"
+unknown(0): onKey  "6"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): onKey  "5"
+unknown(0): BarClock click
+unknown(0): create ("Video")
+unknown(0): ~Fragment()
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ~SVideo
+unknown(0): setVideoFrame  false true
+unknown(0): ~Fragment()
+unknown(0): ~AcessMode()
+unknown(0): ~AIService()

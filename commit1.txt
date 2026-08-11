@@ -1,0 +1,14 @@
+Импорт оригинала s30guiproj из s30guiproj.tar.gz
+
+Исходный код PERCo-S30 GUI (s30gui) и видеопайплайна (percomedia)
+для платы RV1109/1126 (ROCKCHIP). Без изменений.
+
+Компоненты:
+- s30gui/ — Qt5 GUI приложение (26 сцен, SCXML, WebSocket)
+- percomedia/ — видеопайплайн (DRM, RGA, RKNN, rockx)
+- sh/ — скрипты запуска на плате
+- s30guiproj.pro — корневой .pro (subdirs)
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>

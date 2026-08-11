@@ -1,0 +1,209 @@
+unknown(0): QCommandLineParser: call process() or parse() before isSet
+unknown(0): QCommandLineParser: call process() or parse() before isSet
+unknown(0): set face_rect = true
+unknown(0): create ("Video")
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onS30Connected  true
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )
+unknown(0): GView::mouseReleaseEvent pos= QPoint(104,42)
+unknown(0): create ("Password")
+unknown(0): ~SVideo
+unknown(0): setVideoFrame  false true
+unknown(0): ~Fragment()
+unknown(0): ~AcessMode()
+unknown(0): Fragment() is_video= false
+unknown(0): BarClock QRectF(0,10 800x114)
+unknown(0): DigitalKbd created 0x2ead760 240 140 QPointF(40,685) QRectF(40,685 720x563)
+unknown(0): GView::mouseReleaseEvent pos= QPoint(226,732)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(226,732) idx= 0
+unknown(0): onKey  "7"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(376,757)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(376,757) idx= 1
+unknown(0): onKey  "8"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(653,760)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(653,760) idx= 2
+unknown(0): onKey  "9"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(205,889)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(205,889) idx= 3
+unknown(0): onKey  "4"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,926)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,926) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,926)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,926) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,926)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,926) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(425,926)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(425,926) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(170,499)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(170,499) idx= -1
+unknown(0): GView::mouseReleaseEvent pos= QPoint(170,499)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(170,499) idx= -1
+unknown(0): GView::mouseReleaseEvent pos= QPoint(170,499)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(170,499) idx= -1
+unknown(0): GView::mouseReleaseEvent pos= QPoint(170,502)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(170,502) idx= -1
+unknown(0): GView::mouseReleaseEvent pos= QPoint(180,509)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(180,509) idx= -1
+unknown(0): GView::mouseReleaseEvent pos= QPoint(586,946)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(586,946) idx= 5
+unknown(0): onKey  "6"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(404,960)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(404,960) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(404,960)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(404,960) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(404,960)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(404,960) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(415,954)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(415,954) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(415,954)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(415,954) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(415,954)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(415,954) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(415,954)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(415,954) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(695,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(695,944) idx= 5
+unknown(0): onKey  "6"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(390,947)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(390,947) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(390,947)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(390,947) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(390,947)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(390,947) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(390,947)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(390,947) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(390,947)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(390,947) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(422,944)
+unknown(0): DigitalKbd::onMouse 0x2ead760 p= QPointF(422,944) idx= 4
+unknown(0): onKey  "5"
+unknown(0): onScreensaverTick() timeout
+unknown(0): create ("Video")
+unknown(0): ~Fragment()
+unknown(0): DigitalKbd destroyed 0x2ead760
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )
+unknown(0): GView::mouseReleaseEvent pos= QPoint(870,118)
+unknown(0): GView::mouseReleaseEvent pos= QPoint(90,27)
+unknown(0): create ("Password")
+unknown(0): ~SVideo
+unknown(0): setVideoFrame  false true
+unknown(0): ~Fragment()
+unknown(0): ~AcessMode()
+unknown(0): Fragment() is_video= false
+unknown(0): BarClock QRectF(0,10 800x114)
+unknown(0): DigitalKbd created 0x2eae1f0 240 140 QPointF(40,685) QRectF(40,685 720x563)
+unknown(0): GView::mouseReleaseEvent pos= QPoint(205,737)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(205,737) idx= 0
+unknown(0): onKey  "7"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(212,737)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(212,737) idx= 0
+unknown(0): onKey  "7"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(212,737)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(212,737) idx= 0
+unknown(0): onKey  "7"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(215,737)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(215,737) idx= 0
+unknown(0): onKey  "7"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(401,964)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(401,964) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(401,964)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(401,964) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(404,961)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(404,961) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(408,958)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(408,958) idx= 4
+unknown(0): onKey  "5"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(614,947)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(614,947) idx= 5
+unknown(0): onKey  "6"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(177,951)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(177,951) idx= 3
+unknown(0): onKey  "4"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(177,951)
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(177,951) idx= 3
+unknown(0): onKey  "4"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(758,48)
+unknown(0): BarClock click
+unknown(0): DigitalKbd::onMouse 0x2eae1f0 p= QPointF(758,48) idx= -1
+unknown(0): create ("Video")
+unknown(0): ~Fragment()
+unknown(0): DigitalKbd destroyed 0x2eae1f0
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )

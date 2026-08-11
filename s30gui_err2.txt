@@ -1,0 +1,370 @@
+unknown(0): QCommandLineParser: call process() or parse() before isSet
+unknown(0): QCommandLineParser: call process() or parse() before isSet
+unknown(0): set face_rect = true
+unknown(0): create ("Video")
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onS30Connected  true
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )
+unknown(0): GView::mouseReleaseEvent pos= QPoint(99,25)
+unknown(0): create ("Password")
+unknown(0): ~SVideo
+unknown(0): setVideoFrame  false true
+unknown(0): ~Fragment()
+unknown(0): ~AcessMode()
+unknown(0): Fragment() is_video= false
+unknown(0): BarClock QRectF(0,10 800x114)
+unknown(0): DigitalKbd created 0x8b5cb60 240 140 QPointF(40,685) QRectF(40,685 720x563)
+unknown(0): GView::mouseReleaseEvent pos= QPoint(431,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(431,942) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(431,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(431,942) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(431,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(431,942) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(431,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(431,942) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(427,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(427,942) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(431,939)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(431,939) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(431,939)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(431,939) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(434,935)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(434,935) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(434,935)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(434,935) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(382,959)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(382,959) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(382,959)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(382,959) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(382,959)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(382,959) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(389,959)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(389,959) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(396,953)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(396,953) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(424,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(424,942) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(424,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(424,942) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(424,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(424,942) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(424,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(424,942) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(424,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(424,942) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(424,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(424,942) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(424,942)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(424,942) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): onScreensaverTick() timeout
+unknown(0): create ("Video")
+unknown(0): ~Fragment()
+unknown(0): DigitalKbd destroyed 0x8b5cb60
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )
+unknown(0): GView::mouseReleaseEvent pos= QPoint(127,22)
+unknown(0): create ("Password")
+unknown(0): ~SVideo
+unknown(0): setVideoFrame  false true
+unknown(0): ~Fragment()
+unknown(0): ~AcessMode()
+unknown(0): Fragment() is_video= false
+unknown(0): BarClock QRectF(0,10 800x114)
+unknown(0): DigitalKbd created 0x8b5cb60 240 140 QPointF(40,685) QRectF(40,685 720x563)
+unknown(0): GView::mouseReleaseEvent pos= QPoint(410,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(410,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(410,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(410,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(413,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(413,945) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= ""  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "55"  orig= "0000"  isFull= false
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "555"  orig= "0000"  isFull= false
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): GView::mouseReleaseEvent pos= QPoint(417,945)
+unknown(0): DigitalKbd::onMouse 0x8b5cb60 p= QPointF(417,945) idx= 4
+unknown(0): onKey  "5"  pass= "5555"  orig= "0000"  isFull= true
+unknown(0): passValid false pass= "5555" orig= "0000"
+unknown(0): onScreensaverTick() timeout
+unknown(0): create ("Video")
+unknown(0): ~Fragment()
+unknown(0): DigitalKbd destroyed 0x8b5cb60
+unknown(0): Fragment() is_video= false
+unknown(0): SVideo()
+unknown(0): AcessMode()
+unknown(0): setVideoFrame  true false
+unknown(0): SVideo::onShow()
+unknown(0): BarClock QRectF(0,10 800x70)
+unknown(0): onModeChanged  0 false
+unknown(0): setVideoFrame  true true
+unknown(0): SwitchView(bool  false )
+unknown(0): ssaver set  20
+unknown(0): SwitchView(bool  false )
