@@ -111,14 +111,27 @@ include_directories(
 )
 
 # --- Libraries ---
-link_directories(${ROCKIT_LIB} ${LIB_RGA_PATH})
+# Sysroot lib path — librockit.so тянет libasound, libdrm, librockchip_mpp
+# (на плате они есть, при кросс-сборке — в sysroot)
+set(SYSROOT_LIB_DIR "K:/cross_sysroot_aarch64/usr/lib" CACHE PATH "Sysroot lib dir")
+link_directories(${ROCKIT_LIB} ${LIB_RGA_PATH} ${SYSROOT_LIB_DIR})
 
 # --- Программы ---
-set(PROGRAMS vi_grab_frame vi_grab_avs vi_grab_dual)
+set(PROGRAMS vi_grab_frame vi_grab_avs vi_grab_dual vpss_fanout_test avs_mega_fanout_test vi_vo_ivs_md_test vi_vo_bind_test)
 foreach(prog ${PROGRAMS})
     set(src "${CMAKE_SOURCE_DIR}/app/vi_grab_frame/${prog}.c")
+    set(extra_src "${CMAKE_SOURCE_DIR}/app/vi_grab_frame/dma_alloc.c")
     if(EXISTS "${src}")
-        add_executable(${prog} ${src})
+        if(EXISTS "${extra_src}" AND EXISTS "${CMAKE_SOURCE_DIR}/app/vi_grab_frame/${prog}.c")
+            # avs_mega_fanout_test и vi_grab_avs_dma используют dma_alloc.c
+            if(prog STREQUAL "avs_mega_fanout_test")
+                add_executable(${prog} ${src} ${extra_src})
+            else()
+                add_executable(${prog} ${src})
+            endif()
+        else()
+            add_executable(${prog} ${src})
+        endif()
         target_link_libraries(${prog} rockit rga pthread m)
         message(STATUS "Configured ${prog}")
     else()

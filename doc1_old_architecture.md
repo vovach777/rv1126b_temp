@@ -45,17 +45,18 @@ percomedia — **не standalone C-библиотека**, а Qt-библиот�
 Она встроена в Qt event loop хост-приложения и использует Qt как инфраструктуру:
 
 **QtCore (основная зависимость):**
-- `QObject` — базовый класс для `ThreadController`, `ImageSignalProcessing` (сигналы/слоты)
+- `QObject` — базовый класс для `ThreadController`, `ImageSignalProcessing`, `FaceRecogn`, `Users`, `ImageBuf`, `MotionTrigger`, `DbgLogger`
 - `QThread` — два рабочих потока (`threadISP`, `threadNNC`)
 - `QTimer` — период сканирования (100ms), детектор движения (500ms), чтение конфига
-- `QMutex` / `QQueue` — потокобезопасный обмен (`ImageBuf`, `UserList`)
-- `Qt::QueuedConnection` — межпоточное общение ISP↔NNC↔GUI через сигналы
+- `QMutex` — потокобезопасный обмен (`ImageBuf::clientReentry/track_module`, `LockedBuf::mux`, `Users::mux/ir_track_mux/rgb_track_mux`, `MotionTrigger::mux`)
+- `Qt::QueuedConnection` — асинхронное межпоточное взаимодействие ISP↔NNC↔GUI через очередь событий Qt (15 connect'ов)
+- `QQueue` — **только в #include, НЕ используется** (мёртвый include в 4 файлах)
 
 **QtGui (вспомогательная, для обмена с GUI):**
-- `QImage` — кадры лиц для callbacks в AIService (`face()`, `updateGuiOverlay()`)
-- `QRect` / `QSize` — координаты прямоугольников лиц, зоны детекции
+- `QImage` — кадры лиц для callbacks в AIService (`face()` → `QImage`, `userclass.h:194` — QImage из photo)
+- `QRect` / `QSize` — координаты прямоугольников лиц, зоны детекции (`setFaceCatchRect(QRect)`, `face_rect_def`)
 
-**QDebug** — логирование (`percomedia_config.cpp`)
+**QDebug** — логирование (84 упоминания `qDebug()`, плюс операторы `QDebug operator<<` в dbg.cpp для rockx типов)
 
 **Почему так сделано:** percomedia проектировалась как модуль Qt-приложения s30gui,
 а не как независимая библиотека. Qt даёт готовую инфраструктуру (потоки, таймеры,
@@ -194,41 +195,142 @@ VI1 = {RK_ID_VI, dev=1, chn=1}  // IR камера,  "rkispp_scale0"
 
 **Главное:** RGA делает crop+scale+rotate+format-convert за один проход.
 
-| Канал | Назначение | Вход | Выход | Rotation |
+| Канал | Назначение | Вход | Выход | Rotation (runtime) |
 |-------|-----------|------|-------|----------|
-| RGA0 | VO (дисплей) | ARGB8888 800x1280 | RGB888 800x1280 | 0° |
-| RGA1 | NN RGB | NV12 1920x1080 | BGR888 720x1280 | **270°** (по умолчанию) |
-| RGA2 | NN IR | NV12 1920x1080 | BGR888 720x1280 | **270°** |
-| RGA3 | VO (видео) | NV12 1920x1080 crop | ARGB8888 800x1280 | **90°** (по умолчанию) |
+| RGA0 | VO (дисплей) | ARGB8888 800x1280 | RGB888 800x1280 | 0° (фиксировано) |
+| RGA1 | NN RGB | NV12 1920x1080 | BGR888 720x1280 | **90°** (rga_nn_angle) |
+| RGA2 | NN IR | NV12 1920x1080 | BGR888 720x1280 | **90°** (rga_nn_angle) |
+| RGA3 | VO (видео) | NV12 1920x1080 crop | ARGB8888 800x1280 | **270°** (rga_vo_angle) |
 
-**Углы настраиваются из конфига (ispll.h):**
+**Углы настраиваются из конфига (percomedia_config.h → isp::ISPConfig):**
 ```c
-rga_vo_angle = 270;  // угол для дисплея
-rga_nn_angle = 90;   // угол для нейросети
+rga_vo_angle = 270;  // угол для дисплея (RGA3)
+rga_nn_angle = 90;   // угол для нейросети (RGA1, RGA2)
 ```
+Значения по умолчанию в `ISPConfig()` (percomedia_config.h:63-64).
+В `rga_init()` углы применяются к `outs[RGA3]` и `outs[RGA1/RGA2]` (isp_rga.cpp:162-165).
 
 ### 5.3 Bind-схема (ispclass.cpp proc_init)
 
-```
-VI0 (RGB) ─┬─→ RGA3 ─→ RGA0 ─→ VO0 ─→ /dev/dri/card0 (дисплей)
-           └─→ RGA1 ─→ callback (video_packet_callback_rgb) → ImageBuf.RGB
-VI1 (IR)  ───→ RGA2 ─→ callback (video_packet_callback_ir)  → ImageBuf.IR
+**Полная последовательность proc_init() (ispclass.cpp:82-103):**
+```c
+void ImageSignalProcessing::proc_init() {
+  1. if (ispserver не запущен) → new Isp_LL()     // ISP (rk_aiq)
+  2. media_api_init()                              // RK_MPI_SYS_Init()
+  3. vi_init()                                     // VI0 + VI1 каналы
+  4. rga_init()                                    // RGA0-RGA3 каналы
+  5. vo_init()                                     // VO0 канал (DRM)
+  6. if (display_ch==0) bind_to_rga(VI0, RGA3)     // RGB на дисплей
+     else            bind_to_rga(VI1, RGA3)        // IR на дисплей
+  7. bind_to_vo(RGA0)                              // RGA0 → VO0
+  8. bind_to_rga(VI0, RGA1)                        // RGB → NN
+  9. bind_to_rga(VI1, RGA2)                        // IR → NN
+ 10. rga_cb_reg()                                  // ← регистрация callback'ов!
+}
 ```
 
-**Bind'ы (RK_MPI_SYS_Bind):**
-- VI0 → RGA3 (видео на дисплей, поворот 90°)
-- RGA3 → RGA0 (ARGB→RGB888, без поворота)
+**Важно: `vi_cb_reg()` определён (isp_vi.cpp:89), но НИКОГДА НЕ ВЫЗЫВАЕТСЯ — мёртвый код.**
+Callback'и регистрируются только через `rga_cb_reg()`.
+
+**Поток выполнения:** `proc_init()` вызывается через сигнал `init_isp`
+из `ThreadController` (threadcontroller.cpp:34,56), подключённый через
+`Qt::QueuedConnection` к `ImageSignalProcessing::proc_init`.
+`ImageSignalProcessing` живёт в `threadISP` (QThread). Значит **proc_init
+выполняется в threadISP**.
+
+```
+VI0 (RGB) ─┬─→ RGA3 ─→ callback (display_packet_callback)
+           │              → draw_rects + imcomposite
+           │              → RK_MPI_SYS_SendMediaBuffer(RK_ID_RGA, 0, mb)  ← ручная отправка, НЕ bind!
+           │              → RGA0 (по каналу 0) ─→ VO0 ─→ /dev/dri/card0 (дисплей)
+           │
+           └─→ RGA1 ─→ callback (video_packet_callback_rgb) → ImageBuf.RGB
+
+VI1 (IR)  ─┬─→ RGA3 (если display_ch==1, переключение камер!)
+           └─→ RGA2 ─→ callback (video_packet_callback_ir)  → ImageBuf.IR
+```
+
+**Переключение камер на дисплей (display_ch):**
+```c
+if (iconf.display_ch == 0)
+    bind_to_rga(VI0, RGA3);  // RGB на дисплей
+else
+    bind_to_rga(VI1, RGA3);  // IR на дисплей
+```
+`display_ch` из `/home/percomedia.json` (isp::ISPConfig, default=0).
+
+**Bind'ы (RK_MPI_SYS_Bind) — только эти:**
+- VI0 или VI1 → RGA3 (видео на дисплей, поворот rga_vo_angle) — **один из двух**, не оба!
 - RGA0 → VO0 (на DRM overlay plane)
-- VI0 → RGA1 (RGB для нейросети, поворот 270°)
-- VI1 → RGA2 (IR для нейросети, поворот 270°)
+- VI0 → RGA1 (RGB для нейросети, поворот rga_nn_angle)
+- VI1 → RGA2 (IR для нейросети, поворот rga_nn_angle)
+
+**НЕ bind (ручная отправка):**
+- RGA3 → RGA0: `display_packet_callback` принимает кадр с RGA3,
+  рисует прямоугольники, вызывает `RK_MPI_SYS_SendMediaBuffer(RK_ID_RGA, 0, mb)`
+  — кадр попадает на RGA0 (канал 0), оттуда по bind → VO0 → дисплей.
 
 ### 5.4 Callbacks RGA (isp_rga.cpp rga_cb_reg)
 
+**Регистрация (isp_rga.cpp:207-236):**
 ```c
 callbacks[1] = video_packet_callback_rgb;  // RGA1 → ImageBuf.RGB(mb)
 callbacks[2] = video_packet_callback_ir;    // RGA2 → ImageBuf.IR(mb)
 callbacks[3] = display_packet_callback;     // RGA3 → draw_rects + imcomposite → VO
+
+foreach (ch in callbacks) {
+    RK_MPI_SYS_StartRecvFrame(RGA, ch, {s32RecvPicNum=0});  // стоп
+    RK_MPI_SYS_RegisterOutCb(&chan, callbacks[ch]);         // регистрация
+    RK_MPI_SYS_StartRecvFrame(RGA, ch, {s32RecvPicNum=-1}); // пуск бесконечно
+}
 ```
+
+**В каких потоках выполняются callback'и:**
+
+Callback'и — **НЕ Qt slots**, это C-функции, зарегистрированные через
+`RK_MPI_SYS_RegisterOutCb`. Вызываются **напрямую из mpp-потоков** rkmedia
+(синхронный вызов, НЕ через Qt очередь).
+
+Из комментария в isp_rga.cpp:204:
+> «Треды в которых оно вертится предоставляет mpp, и они разные для камер»
+
+Из комментария в ispclass.cpp:247:
+> «ВАРНИНГ: Зависание в каллбэке приведет к зависанию в соответствующем потоке rkmedia!
+>  Подтверждение ворнинга: при использовании QBlockingQueue проводами испускаемых
+>  тут сигналов - стопается картинка на дисплее.»
+
+**Потоки callback'ов (mpp, НЕ Qt):**
+- `video_packet_callback_rgb` (RGA1) — поток mpp для RGB камеры
+- `video_packet_callback_ir` (RGA2) — поток mpp для IR камеры (другой поток!)
+- `display_packet_callback` (RGA3) — поток mpp для дисплея
+
+**Межпоточное общение — два механизма:**
+
+1. **RGA callback → ImageBuf** — прямой вызов C-функции в mpp-потоке,
+   запись в `LockedBuf` под мьютексом (`track_module.tryLock(10)`).
+   Никакой Qt очереди — синхронно в потоке mpp.
+
+2. **Qt signals/slots с `Qt::QueuedConnection`** — событие кладётся в event loop
+   потока-приёмника, слот выполнится когда поток дойдёт до него:
+   - `init_isp` → `proc_init` (ThreadController → threadISP)
+   - `tscan timeout` → `onTRecognizeTask` (ThreadController → threadNNC)
+   - `Users::user_change` → `on_face` (mpp-поток → главный поток ThreadController)
+   - `Users::user_lost` → `on_lost` (mpp-поток → главный поток)
+   - `MotionTrigger::motion_changed` → `on_motion` (mpp-поток → главный поток)
+   - `ImageSignalProcessing::wdt` → `DbgLogger::dbg` (mpp → главный поток)
+   - `ImageBuf::wdt` → `DbgLogger::dbg` (mpp → главный поток)
+
+   **Потоки объектов (moveToThread):**
+   - `ImageSignalProcessing` → `threadISP`
+   - `FaceRecogn` → `threadNNC`
+   - `Users`, `ImageBuf`, `MotionTrigger`, `DbgLogger` — **главный поток** ThreadController
+     (не moveToThread, живут в потоке где созданы)
+
+   Callback'и RGA **эмитят Qt-сигналы** (`emit Instance()->wdt(...)`,
+   `emit user_change(...)`, `emit motion_changed(...)`) из mpp-потоков —
+   эти сигналы идут через `QueuedConnection` в потоки приёмников
+   (главный поток для DbgLogger/Users/MotionTrigger).
+   Но сама работа callback'а (track, ImageBuf, draw_rects) — в mpp-потоке.
 
 ### 5.5 Рисование прямоугольников (ispclass.cpp draw_rects + display_packet_callback)
 
@@ -247,7 +349,7 @@ callbacks[3] = display_packet_callback;     // RGA3 → draw_rects + imcomposite
        imfill(rect_mb, rect_right, color)
 4. imcomposite(src_mb, rect_mb, src_mb, IM_ALPHA_BLEND_DST_OVER)  // смешивание
 5. imsync()
-6. RK_MPI_SYS_SendMediaBuffer(RK_ID_RGA, 0, mb)    // → VO → дисплей
+6. RK_MPI_SYS_SendMediaBuffer(RK_ID_RGA, 0, mb)    // → RGA0 → VO → дисплей (НЕ bind!)
 ```
 
 **Цвета по состоянию (draw_rects):**
@@ -264,14 +366,23 @@ callbacks[3] = display_packet_callback;     // RGA3 → draw_rects + imcomposite
 повёрнутом кадре 720x1280 portrait), а рисование идёт в 800x1280 portrait.
 Масштаб 720→800 по X, 1280→1280 по Y — учитывается в draw_rects через `VO_DISP_W/H`.
 
-### 5.6 VENC — JPEG энкодер (isp_enc.cpp)
+### 5.6 VENC — JPEG энкодер (isp_enc.cpp) — МЁРТВЫЙ КОД!
 
-Два канала для снимков:
+**ВНИМАНИЕ: `venc_init()` и `bind_to_venc()` НИКОГДА НЕ ВЫЗЫВАЮТСЯ!**
+В `proc_init()` (ispclass.cpp:82-103) нет вызова `venc_init()`.
+Код определения ENC0/ENC1, колбэков, bind'ов — существует, но не используется.
+
+Два канала для снимков (определено, но НЕ вызывается):
 ```c
 ENC0 = {RK_ID_VENC, chn=0}  // RGB JPEG 1920x1080, 1 fps
 ENC1 = {RK_ID_VENC, chn=1}  // IR  JPEG 1920x1080, 10 fps
 ```
-Привязан к VI через bind, callback пишет в `/tmp/rgb.jpeg` и `/tmp/ir.jpeg`.
+Колбэки `video_packet_callback_rgb/ir` в VENC зарегистрированы, но
+bind VI→VENC не происходит — **JPEG файлы `/tmp/rgb.jpeg` и `/tmp/ir.jpeg`
+не создаются**.
+
+**Вывод:** VENC — мёртвый код. Фото для распознавания берётся из
+ImageBuf (rockx_image_t из RGA1/RGA2 callback), а не из JPEG.
 
 ### 5.7 Isp_LL — rk_aiq (ispll.h)
 
@@ -413,19 +524,37 @@ photo_en = true;  photo_w = 300;  photo_h = 300;  photo_margin = 1.5;
 
 ### 6.3 Трекинг (track)
 
+**Важно: `track()` вызывается НЕ только в таймере, но и в ImageBuf callbacks!**
+
+В `ImageBuf::RGB(mb)` и `ImageBuf::IR(mb)` (imagebuf.cpp:42,70):
+```c
+FaceRecogn::Instance()->track(b, rgb_arr);  // вызывается на каждый кадр!
+```
+
+Сам `track()` (nnclass.cpp:520-526):
 ```c
 rockx_face_detect(FACE_DETECTION, pic, &obj, nullptr);
 rockx_object_track(OBJECT_TRACK, w, h, 10, &obj, obj_track);
 ```
 Результат — `rockx_object_array_t` с id, box, score для каждого отслеживаемого лица.
 
+Также в callbacks вызывается `Users::tracklist()` — обновление списка
+пользователей происходит **на каждый кадр** (imagebuf.cpp:48,76),
+а не только в таймере сканирования.
+
 ### 6.4 Таймер сканирования (onTRecognizeTask)
+
+Таймер `tscan` (scan_period_ms=100) запускается через `setScanEnable(true)`
+(вызывается из `PercoMedia::setNNRun(true)`).
+
+**Важно: `tscan->start()` закомментирован в конструкторе** (threadcontroller.cpp:67)
+и запускается только при `setScanEnable(true)`.
 
 ```c
 void onTRecognizeTask() {
     int id = Users::Instance()->get_user();  // выбрать кандидата
     if (id < 0) return;
-    if (ImageBuf::lockPic(ir, rgb)) {        // синхронный захват пары IR+RGB
+    if (ImageBuf::lockPic(ir, rgb)) {        // захват пары IR+RGB (без проверки isSync!)
         user u = user_list.user_by_id(id);
         if (st == CHECK || st == CHECK_ERR)
             check_face(rgb, ir, id);          // шаг 1-6 (фильтры)
@@ -435,6 +564,22 @@ void onTRecognizeTask() {
     }
 }
 ```
+
+**Архитектурный недостаток: QueuedConnection для onTRecognizeTask избыточен.**
+
+`tscan` (100ms) → `Qt::QueuedConnection` → `onTRecognizeTask` в threadNNC.
+Если recognize длится дольше 100ms — тики копятся в очереди threadNNC.
+Когда очередь доходит — каждый тик берёт один и тот же latest кадр (lockPic
+берёт последний, не тот что при тике) и делает ту же работу повторно.
+
+**Правильнее:** распознавание не требует очереди событий — нужен актуальный
+кадр. Лучше:
+- Прямой вызов из callback'а (как `track()` — синхронно в mpp-потоке)
+- Или condvar/флаг в callback'е, поток NN забирает когда готов — без очереди тиков
+
+QueuedConnection здесь работает как "межпоточный вызов", но копит лишние
+события. Для медленного recognize это не страшно (лишние тики отбрасываются
+по `get_user()`), но архитектурно избыточно.
 
 ### 6.5 Фото для GUI (nn_face, опционально)
 
@@ -504,6 +649,30 @@ video_packet_callback_rgb(mb) → ImageBuf::RGB(mb)
 video_packet_callback_ir(mb)  → ImageBuf::IR(mb)
 ```
 
+**Важно: в callback'ах происходит track() и tracklist() — НЕ только в таймере!**
+
+`ImageBuf::RGB(mb)` (imagebuf.cpp:59-88):
+1. `Users::rgb_obj_array()` — получить массив объектов
+2. `Users::maxscore(rgb_arr)` — максимальный score
+3. `MotionTrigger::rect_filter(rgb_arr)` — фильтр движения
+4. `track_module.tryLock(10)` — мьютекс трекинга (10ms таймаут)
+5. `FaceRecogn::track(b, rgb_arr)` — **трекинг** (rockx_face_detect + rockx_object_track)
+6. Если `m_score > 0.98` → `bRGB.get_buf(b)` — сохранить кадр (высокий порог!)
+7. `Users::tracklist()` — **обновление списка пользователей**
+8. `track_module.unlock()`
+
+`ImageBuf::IR(mb)` (imagebuf.cpp:33-57):
+1. `Users::ir_obj_array()` — получить массив объектов
+2. `Users::maxscore(ir_arr)` — максимальный score
+3. `track_module.tryLock(10)` — мьютекс трекинга
+4. `FaceRecogn::track(b, ir_arr)` — **трекинг**
+5. Если `m_score > 0.85` → `bIR.get_buf(b)` — сохранить кадр (порог ниже RGB!)
+6. `Users::tracklist()` — **обновление списка пользователей**
+7. `track_module.unlock()`
+
+**Пороги сохранения кадра:** RGB `m_score > 0.98`, IR `m_score > 0.85`.
+Разные пороги — RGB строже (нужно качественное фото), IR слабее (достаточно детекции).
+
 NNC забирает пару синхронно:
 ```c
 if (ImageBuf::lockPic(ir, rgb)) {  // ждёт пока оба буфера готовы
@@ -513,8 +682,17 @@ if (ImageBuf::lockPic(ir, rgb)) {  // ждёт пока оба буфера го
 ```
 
 Реализация: два `Lockedbuf` (bIR, bRGB) с мьютексами. Если кадр не забрали —
-новый перезаписывает старый (drop). `isSync()` — проверка что оба свежие
-(разница PTS < FR_DROP_MS=100ms).
+новый перезаписывает старый (drop).
+
+**`isSync()` — ОТКЛЮЧЁН!** Функция определена (imagebuf.cpp:24-31), проверяет
+что оба кадра свежие (разница PTS < FR_DROP_MS=100ms), но вызовы
+**закомментированы** в `ImageBuf::RGB()` и `ImageBuf::IR()`:
+```c
+//if (!isSync())
+    bRGB.get_buf(b);   // сохраняет БЕЗ проверки синхронности
+```
+Кадры сохраняются в буфер **независимо** от синхронности RGB↔IR.
+Синхронность не проверяется — `lockPic` просто берёт последние доступные.
 
 ---
 
@@ -1096,9 +1274,20 @@ usr/include (заголовки из источников выше)
 ## 12. Размеры и форматы (percomedia_config.h)
 
 ```c
-// Камеры (ДВЕ камеры — зафиксировано в архитектуре)
-CAM_RGB_W = 1920;  CAM_RGB_H = 1080;   // RGB камера (SC200AI/SC200AI)
-CAM_IR_W  = 1920;  CAM_IR_H  = 1080;   // IR камера
+// Камеры (ДВЕ камеры — обе физически подключены на old)
+// Разные сенсоры, одинаковое разрешение 1920x1080
+// Проверено на old: i2c-1 0x32+0x37 заняты драйверами, IQ files есть
+//
+// Соответствие rk_aiq CamId ↔ VI DevId (ispll.cpp:52,77):
+//   rk_aiq CamId 0 = IR  = GC2053  (i2c 0x37, модуль YT-RV1109-2-V1, линза 40IR-2MP-F20)
+//   rk_aiq CamId 1 = RGB = SC200AI (i2c 0x32, модуль C7234A-400,  линза 30IRC-2MP-F20)
+// Обе front-facing, 2MP, F2.0
+//
+// IQ files на old (/etc/iqfiles/):
+//   gc2053_YT-RV1109-2-V1_40IR-2MP-F20.xml
+//   sc200ai1_C7234A-400_30IRC-2MP-F20.xml
+CAM_RGB_W = 1920;  CAM_RGB_H = 1080;   // RGB = SC200AI (rk_aiq CamId 1, VI DevId 1)
+CAM_IR_W  = 1920;  CAM_IR_H  = 1080;   // IR  = GC2053  (rk_aiq CamId 0, VI DevId 0)
 
 // Нейросеть (повёрнутый кадр portrait)
 NN_W = 720;  NN_H = 1280;              // = 360*2 × 640*2, после rot270
@@ -1181,9 +1370,9 @@ int y = VO_DISP_H - (u.rect.bottom+v_gap);       // 1280 - rect.bottom(≤1280)
    bool good_score = (rgb_score > score_lim) && (ir_score > score_lim);     // ОБА score
    ```
 
-7. **VENC (isp_enc.cpp):** два JPEG энкодера
-   - ENC0 → `/tmp/rgb.jpeg` (1 fps)
-   - ENC1 → `/tmp/ir.jpeg` (10 fps)
+7. **VENC (isp_enc.cpp):** два JPEG энкодера — **МЁРТВЫЙ КОД** (venc_init не вызывается)
+   - ENC0 → `/tmp/rgb.jpeg` (1 fps) — НЕ создаются
+   - ENC1 → `/tmp/ir.jpeg` (10 fps) — НЕ создаются
 
 8. **DbgLogger (dbg.h):** `NN_RGB_CB`, `NN_IR_CB` — отдельные callback-метки
 
@@ -1194,7 +1383,7 @@ int y = VO_DISP_H - (u.rect.bottom+v_gap);       // 1280 - rect.bottom(≤1280)
    ```
 
 **Вывод:** двухкамерность пронизывает **весь код** — VI, RGA, ImageBuf, Users,
-FaceRecogn, VENC, конфиг. Убрать IR камеру = переписать ~30% логики.
+FaceRecogn, конфиг. VENC — мёртвый код (не влияет). Убрать IR камеру = переписать ~30% логики.
 
 ---
 
@@ -1203,21 +1392,31 @@ FaceRecogn, VENC, конфиг. Убрать IR камеру = переписа�
 ```
 ┌─ RGB камера 1920x1080 NV12  ─┐
 │                              │
-│  VI0 ─┬─ RGA3(rot90,→ARGB) ──┼─ RGA0(→RGB888) ─ VO0 ─ DRM ─ дисплей 800x1280
-│       │                      │           ↑
-│       │                      │   imcomposite(video, rect_overlay, video)
-│       │                      │           ↑
+│  VI0 ─┬─ RGA3(rot270,→ARGB) ─ callback(display_packet_callback)
 │       │                      │   draw_rects(rect_mb): imfill × 4 линии на user
-│       │                      │           ↑
-│       │                      │   rectangle_mb (ARGB8888 800x1280) — оверлей
+│       │                      │   imcomposite(video, rect_overlay, video)
+│       │                      │   RK_MPI_SYS_SendMediaBuffer(RK_ID_RGA,0,mb) ← ручная отправка!
+│       │                      │      → RGA0(→RGB888, rot0) ─ bind ─ VO0 ─ DRM ─ дисплей 800x1280
 │       │                      │
-│       └─ RGA1(rot270,→BGR888 720x1280) ─ callback ─ ImageBuf.RGB
+│       └─ RGA1(rot90,→BGR888 720x1280) ─ callback(video_packet_callback_rgb)
 │                                              ↓
-│  VI1 ─── RGA2(rot270,→BGR888 720x1280) ─ callback ─ ImageBuf.IR
+│                                       ImageBuf.RGB(mb):
+│                                         track(b, rgb_arr)      ← трекинг на каждый кадр!
+│                                         if m_score>0.98: save  ← порог сохранения
+│                                         Users::tracklist()     ← обновление списка
 │                                              ↓
-│                              ImageBuf.lockPic(ir, rgb) — синхронный захват
+│  VI1 ─┬─ RGA3 (если display_ch==1!) ─ ... (то же что VI0 выше)
+│       │
+│       └─ RGA2(rot90,→BGR888 720x1280) ─ callback(video_packet_callback_ir)
 │                                              ↓
-│  FaceRecogn::onTRecognizeTask (по таймеру 100ms):
+│                                       ImageBuf.IR(mb):
+│                                         track(b, ir_arr)       ← трекинг на каждый кадр!
+│                                         if m_score>0.85: save  ← порог ниже RGB
+│                                         Users::tracklist()     ← обновление списка
+│                                              ↓
+│                              ImageBuf.lockPic(ir, rgb) — захват (БЕЗ проверки isSync!)
+│                                              ↓
+│  FaceRecogn::onTRecognizeTask (по таймеру 100ms, через setScanEnable):
 │    1. Users::get_user() → id кандидата
 │    2. check_face(rgb, ir, id):
 │       rockx_face_detect → score/size фильтр
@@ -1228,12 +1427,20 @@ FaceRecogn, VENC, конфиг. Убрать IR камеру = переписа�
 │       rockx_face_align(5) → aligned 112x112
 │       rockx_face_recognize → 512-float feature
 │    4. user_list.set_feature(id, feature)
-│    5. Users::tracklist() → emit user_change / user_lost
+│    5. (tracklist уже вызван в callback'ах выше)
 │                                              ↓
 │  callbacks → AIService → Qt signals → MainWin → UI
 │                                              ↓
 │  JsonService → WebSocket → сервер PERCo-S30
 ```
+
+**Ключевые отличия от прежней схемы:**
+- RGA3→RGA0 — **НЕ bind**, а callback + `SendMediaBuffer` (ручная отправка)
+- `track()` и `tracklist()` — в **ImageBuf callbacks**, не только в таймере
+- `isSync()` — **отключён** (закомментирован)
+- `display_ch` — переключение камеры на дисплей (VI0 или VI1 → RGA3)
+- VENC — **мёртвый код** (не вызывается)
+- Углы: RGA3=270° (rga_vo_angle), RGA1/RGA2=90° (rga_nn_angle)
 
 ---
 

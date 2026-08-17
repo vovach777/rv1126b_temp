@@ -56,7 +56,12 @@ message(STATUS "rkaiq include: ${RKAIQ_ROOT}")
 # === Флаги ===
 add_definitions(-DOS_LINUX -Wno-unused-variable -Wno-unused-but-set-variable)
 
+# Sysroot lib path — librockit.so тянет libasound, libdrm, librockchip_mpp
+# (на плате они есть, при кросс-сборке — в sysroot)
+set(SYSROOT_LIB_DIR "K:/cross_sysroot_aarch64/usr/lib" CACHE PATH "Sysroot lib dir")
+
 # === Исполняемые файлы ===
+link_directories(${SYSROOT_LIB_DIR})
 
 # vi_grab_frame — один сенсор
 add_executable(vi_grab_frame vi_grab_frame.c)
@@ -71,6 +76,15 @@ target_include_directories(vi_grab_dual PRIVATE ${ROCKIT_INCLUDE_DIR})
 target_link_directories(vi_grab_dual PRIVATE ${ROCKIT_LIB_DIR})
 target_link_libraries(vi_grab_dual rockit m pthread)
 install(TARGETS vi_grab_dual RUNTIME DESTINATION "bin")
+
+# vpss_fanout_test — VPSS fan-out: 2 channel, читаем только CHN0, CHN1 не трогаем
+add_executable(vpss_fanout_test vpss_fanout_test.c)
+target_include_directories(vpss_fanout_test PRIVATE
+    ${ROCKIT_INCLUDE_DIR} ${RGA_INCLUDE_DIRS})
+target_link_directories(vpss_fanout_test PRIVATE
+    ${ROCKIT_LIB_DIR} ${LIB_RGA_PATH})
+target_link_libraries(vpss_fanout_test rockit rga m)
+install(TARGETS vpss_fanout_test RUNTIME DESTINATION "bin")
 
 # vi_grab_avs — аппаратное сшивание двух камер через AVS (мега-кадр)
 add_executable(vi_grab_avs vi_grab_avs.c)
@@ -98,3 +112,15 @@ target_include_directories(stereo_demo PRIVATE
 target_link_directories(stereo_demo PRIVATE ${ROCKIT_LIB_DIR} ${RKAIQ_LIB_DIR})
 target_link_libraries(stereo_demo rockit rkaiq m pthread)
 install(TARGETS stereo_demo RUNTIME DESTINATION "bin")
+
+# avs_mega_fanout_test — AVS sync → мега-кадр → RGA split для NN + display
+# Пайплайн: VI×2 → AVS (bSyncPipe) → мега 1920×2160
+#   → RGA crop RGB half → DMA (NN RGB thread, ~10fps)
+#   → RGA crop IR half  → DMA (NN IR thread, ~10fps)
+#   → RGA crop display_ch half + rot90 → VO (30fps, switch every 2s)
+add_executable(avs_mega_fanout_test avs_mega_fanout_test.c dma_alloc.c)
+target_include_directories(avs_mega_fanout_test PRIVATE
+    ${ROCKIT_INCLUDE_DIR} ${RGA_INCLUDE_DIRS})
+target_link_directories(avs_mega_fanout_test PRIVATE ${ROCKIT_LIB_DIR} ${LIB_RGA_PATH})
+target_link_libraries(avs_mega_fanout_test rockit rga m pthread)
+install(TARGETS avs_mega_fanout_test RUNTIME DESTINATION "bin")
