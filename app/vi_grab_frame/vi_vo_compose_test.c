@@ -5,7 +5,7 @@
  *   GC2093 #1 → VI dev 0 / pipe 0
  *                ├─ ext chn 4 → SYS_Bind → IVS MD
  *                ├─ ext chn 5 → SYS_Bind → VO chn 0 (full screen, priority=0, ROT90)
- *                └─ ext chn 3 → SYS_Bind → VO chn 3 (miniPiP 1/8, top-right, priority=3, ROT90, 4fps)
+ *                └─ ext chn 3 → SYS_Bind → VO chn 3 (miniPiP 1/8, top-right, priority=1, ROT90, 4fps)
  *
  *   GC2093 #2 → VI dev 1 / pipe 1
  *                └─ ext chn 5 → SYS_Bind → VO chn 1 (PiP 1/4, priority=1, ROT90)
@@ -378,14 +378,14 @@ static int vo_init(void)
     ret = RK_MPI_VO_EnableChn(VO_LAYER, VO_CHN_UI);
     if (ret) { fprintf(stderr, "VO_EnableChn[ui]: %#x\n", ret); return -1; }
 
-    /* ---- Chn 3: cam 0, mini PiP (1/8 screen), top-right, priority=3, ROT90 ---- */
+    /* ---- Chn 3: cam 0, mini PiP (1/8 screen), top-right, priority=1, ROT90 ---- */
     int mini_w = pip_w / 2;   /* 180 — half of PiP */
     int mini_h = pip_h / 2;   /* 320 */
     int mini_x = dispW - mini_w;  /* top-right */
     int mini_y = 0;
     memset(&VoChnAttr, 0, sizeof(VoChnAttr));
     VoChnAttr.bDeflicker = RK_FALSE;
-    VoChnAttr.u32Priority = 3;
+    VoChnAttr.u32Priority = 1;  /* same as cam1 PiP — below UI border (priority=2) */
     VoChnAttr.stRect.s32X = mini_x;
     VoChnAttr.stRect.s32Y = mini_y;
     VoChnAttr.stRect.u32Width = mini_w;
@@ -434,7 +434,7 @@ static int vo_init(void)
     printf("  chn %d: cam1 PiP (%d,%d,%dx%d) (priority=1, ROT90)\n",
            VO_CHN_CAM1, pip_x, pip_y, pip_w, pip_h);
     printf("  chn %d: UI green border (priority=2, SendFrame RGBA8888)\n", VO_CHN_UI);
-    printf("  chn %d: cam0 miniPiP (%d,%d,%dx%d) (priority=3, ROT90, 4fps)\n",
+    printf("  chn %d: cam0 miniPiP (%d,%d,%dx%d) (priority=1, ROT90, 4fps)\n",
            VO_CHN_CAM2, mini_x, mini_y, mini_w, mini_h);
     return 0;
 }
