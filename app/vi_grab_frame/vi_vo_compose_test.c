@@ -17,8 +17,17 @@
  *
  * Запуск:
  *   systemctl stop s30gui
- *   /tmp/vi_vo_compose_test
+ *   /tmp/vi_vo_compose_test [options]
  *   sleep 5 && modetest -M rockchip -w 59:zpos:0
+ *
+ * Options:
+ *   --ivs-size WxH     IVS frame size (default 1920x1080)
+ *   --md-sens N        MDSensibility (default 3)
+ *   --md-sad N         ThreshSad (default 80)
+ *   --md-move N        ThreshMove (default 2)
+ *   --md-area N        Area threshold %% of frame (default 1)
+ *   --md-timeout MS    Green border hold after motion, ms (default 3000)
+ *   -h, --help         Show help
  */
 
 #include <stdio.h>
@@ -28,6 +37,7 @@
 #include <signal.h>
 #include <time.h>
 #include <pthread.h>
+#include <getopt.h>
 #include <sys/prctl.h>
 
 #include "rk_mpi_sys.h"
@@ -44,8 +54,6 @@
 /* ---- Размеры ---- */
 #define CAM_W       1920
 #define CAM_H       1080
-#define IVS_W       1920
-#define IVS_H       1080
 #define DISP_W      720
 #define DISP_H      1280
 
@@ -70,6 +78,27 @@
 
 /* ---- Green border ---- */
 #define BORDER_THICKNESS  20
+
+/* ---- MD config (CLI-tunable) ---- */
+typedef struct {
+    int ivs_w;           /* IVS frame width          */
+    int ivs_h;           /* IVS frame height         */
+    int md_sens;         /* u32MDSensibility         */
+    int md_sad;          /* s32ThreshSad             */
+    int md_move;         /* s32ThreshMove            */
+    int md_area;         /* area threshold, % of frame */
+    int md_timeout;      /* green border hold, ms    */
+} md_config_t;
+
+static md_config_t g_md_cfg = {
+    .ivs_w = 1920,
+    .ivs_h = 1080,
+    .md_sens = 3,
+    .md_sad = 80,
+    .md_move = 2,
+    .md_area = 1,
+    .md_timeout = 3000,
+};
 
 static volatile int g_exit = 0;
 static void sig_handler(int s) { (void)s; g_exit = 1; }
@@ -117,10 +146,10 @@ static int vi_init_cam(int dev_id, int pipe_id, int enable_ivs)
         memset(&chnAttr, 0, sizeof(chnAttr));
         chnAttr.stIspOpt.u32BufCount = 2;
         chnAttr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
-        chnAttr.stIspOpt.stMaxSize.u32Width = IVS_W;
-        chnAttr.stIspOpt.stMaxSize.u32Height = IVS_H;
-        chnAttr.stSize.u32Width = IVS_W;
-        chnAttr.stSize.u32Height = IVS_H;
+        chnAttr.stIspOpt.stMaxSize.u32Width = g_md_cfg.ivs_w;
+        chnAttr.stIspOpt.stMaxSize.u32Height = g_md_cfg.ivs_h;
+        chnAttr.stSize.u32Width = g_md_cfg.ivs_w;
+        chnAttr.stSize.u32Height = g_md_cfg.ivs_h;
         chnAttr.enPixelFormat = RK_FMT_YUV420SP;
         chnAttr.enCompressMode = COMPRESS_MODE_NONE;
         chnAttr.u32Depth = 0;
@@ -148,6 +177,8 @@ static int vi_init_cam(int dev_id, int pipe_id, int enable_ivs)
            dev_id, pipe_id, enable_ivs ? VI_CHN_IVS : -1,
            enable_ivs ? " (IVS)" : "",
            VI_CHN_DISP, CAM_W, CAM_H);
+    if (enable_ivs)
+        printf("     IVS size: %dx%d\n", g_md_cfg.ivs_w, g_md_cfg.ivs_h);
     return 0;
 }
 
@@ -346,10 +377,10 @@ static int ivs_init(void)
     IVS_CHN_ATTR_S attr;
     memset(&attr, 0, sizeof(attr));
     attr.enMode = IVS_MODE_MD_OD;
-    attr.u32PicWidth = IVS_W;
-    attr.u32PicHeight = IVS_H;
-    attr.u32MaxWidth = IVS_W;
-    attr.u32MaxHeight = IVS_H;
+    attr.u32PicWidth = g_md_cfg.ivs_w;
+    attr.u32PicHeight = g_md_cfg.ivs_h;
+    attr.u32MaxWidth = g_md_cfg.ivs_w;
+    attr.u32MaxHeight = g_md_cfg.ivs_h;
     attr.enPixelFormat = RK_FMT_YUV420SP;
     attr.s32Gop = 30;
     attr.bSmearEnable = RK_FALSE;
@@ -357,7 +388,7 @@ static int ivs_init(void)
     attr.bMDEnable = RK_TRUE;
     attr.s32MDInterval = 1;
     attr.bMDNightMode = RK_TRUE;
-    attr.u32MDSensibility = 3;
+    attr.u32MDSensibility = g_md_cfg.md_sens;
     attr.bODEnable = RK_FALSE;
     attr.s32ODInterval = 1;
     attr.s32ODPercent = 6;
@@ -369,8 +400,8 @@ static int ivs_init(void)
     memset(&stMdAttr, 0, sizeof(stMdAttr));
     ret = RK_MPI_IVS_GetMdAttr(IVS_CHN, &stMdAttr);
     if (ret) { fprintf(stderr, "IVS_GetMdAttr: %#x\n", ret); return -1; }
-    stMdAttr.s32ThreshSad = 80;
-    stMdAttr.s32ThreshMove = 2;
+    stMdAttr.s32ThreshSad = g_md_cfg.md_sad;
+    stMdAttr.s32ThreshMove = g_md_cfg.md_move;
     stMdAttr.s32SwitchSad = 0;
     stMdAttr.bFlycatkinFlt = RK_TRUE;
     stMdAttr.s32ThresDustMove = 3;
@@ -389,7 +420,10 @@ static int ivs_init(void)
     ret = RK_MPI_SYS_Bind(&vi_chn, &ivs_chn);
     if (ret) { fprintf(stderr, "SYS_Bind VI→IVS: %#x\n", ret); return -1; }
 
-    printf("IVS: MD on cam0 %dx%d, sensibility=3, threshSad=80, threshMove=2\n", IVS_W, IVS_H);
+    printf("IVS: MD on cam0 %dx%d, sens=%d, sad=%d, move=%d, area=%d%%, timeout=%dms\n",
+           g_md_cfg.ivs_w, g_md_cfg.ivs_h,
+           g_md_cfg.md_sens, g_md_cfg.md_sad, g_md_cfg.md_move,
+           g_md_cfg.md_area, g_md_cfg.md_timeout);
     return 0;
 }
 
@@ -519,12 +553,12 @@ static void *ivs_results_thread(void *arg)
     (void)arg;
     prctl(PR_SET_NAME, "IvsMdResults", 0, 0, 0);
 
-    int md_area_threshold = IVS_W * IVS_H * 1 / 100;
+    int md_area_threshold = g_md_cfg.ivs_w * g_md_cfg.ivs_h * g_md_cfg.md_area / 100;
     double last_report = now_ms();
     int frame_count = 0;
     int motion_detected = 0;
     double last_motion_time = 0;
-    double motion_timeout_ms = 3000;  /* green border stays 3s after last motion */
+    double motion_timeout_ms = g_md_cfg.md_timeout;
 
     while (!g_exit) {
         IVS_RESULT_INFO_S stResults;
@@ -608,6 +642,82 @@ static void *ui_thread(void *arg)
 }
 
 /* ========================================================================
+ * CLI parsing
+ * ====================================================================== */
+static void print_usage(const char *name)
+{
+    printf("usage: %s [options]\n", name);
+    printf("  --ivs-size WxH     IVS frame size (default 1920x1080)\n");
+    printf("  --md-sens N        MDSensibility (default 3)\n");
+    printf("  --md-sad N         ThreshSad (default 80)\n");
+    printf("  --md-move N        ThreshMove (default 2)\n");
+    printf("  --md-area N        Area threshold %% of frame (default 1)\n");
+    printf("  --md-timeout MS    Green border hold after motion, ms (default 3000)\n");
+    printf("  -h, --help         Show this help\n");
+    printf("\nExamples:\n");
+    printf("  %s --ivs-size 640x360 --md-sens 5 --md-sad 50\n", name);
+    printf("  %s --md-area 5 --md-timeout 5000\n", name);
+}
+
+static int parse_size(const char *s, int *w, int *h)
+{
+    if (sscanf(s, "%dx%d", w, h) != 2) {
+        fprintf(stderr, "Invalid size '%s', expected WxH (e.g. 640x360)\n", s);
+        return -1;
+    }
+    if (*w <= 0 || *h <= 0) {
+        fprintf(stderr, "Invalid size %dx%d\n", *w, *h);
+        return -1;
+    }
+    return 0;
+}
+
+static void parse_args(int argc, char *argv[])
+{
+    static struct option long_opts[] = {
+        {"ivs-size",   required_argument, 0, 's'},
+        {"md-sens",    required_argument, 0, 'S'},
+        {"md-sad",     required_argument, 0, 'a'},
+        {"md-move",    required_argument, 0, 'm'},
+        {"md-area",    required_argument, 0, 'A'},
+        {"md-timeout", required_argument, 0, 't'},
+        {"help",       no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int c, idx;
+    while ((c = getopt_long(argc, argv, "h", long_opts, &idx)) != -1) {
+        switch (c) {
+        case 's': /* --ivs-size */
+            if (parse_size(optarg, &g_md_cfg.ivs_w, &g_md_cfg.ivs_h) < 0)
+                exit(1);
+            break;
+        case 'S': /* --md-sens */
+            g_md_cfg.md_sens = atoi(optarg);
+            break;
+        case 'a': /* --md-sad */
+            g_md_cfg.md_sad = atoi(optarg);
+            break;
+        case 'm': /* --md-move */
+            g_md_cfg.md_move = atoi(optarg);
+            break;
+        case 'A': /* --md-area */
+            g_md_cfg.md_area = atoi(optarg);
+            break;
+        case 't': /* --md-timeout */
+            g_md_cfg.md_timeout = atoi(optarg);
+            break;
+        case 'h':
+            print_usage(argv[0]);
+            exit(0);
+        default:
+            print_usage(argv[0]);
+            exit(1);
+        }
+    }
+}
+
+/* ========================================================================
  * Main
  * ====================================================================== */
 int main(int argc, char *argv[])
@@ -615,12 +725,18 @@ int main(int argc, char *argv[])
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 
+    parse_args(argc, argv);
+
     printf("\n=== vi_vo_compose_test (2 cameras + green border overlay) ===\n");
     printf("    Cam0: GC2093 #1 → VI dev0/pipe0 → VO chn0 (full screen, ROT90)\n");
     printf("    Cam1: GC2093 #2 → VI dev1/pipe1 → VO chn1 (PiP 1/4, ROT90)\n");
     printf("    UI:   RGBA8888 → VO chn2 (green border, priority=2)\n");
     printf("    IVS:  MD on cam0 → drives green border\n");
-    printf("    VO layer 0: GRAPHIC + RGA splice\n\n");
+    printf("    VO layer 0: GRAPHIC + RGA splice\n");
+    printf("    MD config: ivs=%dx%d sens=%d sad=%d move=%d area=%d%% timeout=%dms\n\n",
+           g_md_cfg.ivs_w, g_md_cfg.ivs_h,
+           g_md_cfg.md_sens, g_md_cfg.md_sad, g_md_cfg.md_move,
+           g_md_cfg.md_area, g_md_cfg.md_timeout);
     fflush(stdout);
 
     int ret = RK_MPI_SYS_Init();
