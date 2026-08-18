@@ -27,6 +27,7 @@
  *   --md-move N        ThreshMove (default 2)
  *   --md-area N        Area threshold %% of frame (default 1)
  *   --md-timeout MS    Green border hold after motion, ms (default 3000)
+ *   --color-test       Draw R/G/B bars once and exit (verify R/B order)
  *   -h, --help         Show help
  */
 
@@ -50,6 +51,9 @@
 #include "rk_comm_vi.h"
 #include "rk_comm_vo.h"
 #include "rk_comm_ivs.h"
+
+#include "im2d.h"
+#include "rga.h"
 
 /* ---- Размеры ---- */
 #define CAM_W       1920
@@ -79,6 +83,16 @@
 /* ---- Green border ---- */
 #define BORDER_THICKNESS  20
 
+/* ---- RGA color constants for RK_FORMAT_RGBA_8888 ----
+ * Layout (little-endian 32-bit): 0xAABBGGRR
+ *   byte0 = R (LSB), byte1 = G, byte2 = B, byte3 = A (MSB)
+ * RGA header rga.h: RK_FORMAT_RGBA_8888 = "[0:31] R:G:B:A 8:8:8:8 little endian"
+ */
+#define RGA_COLOR_TRANSPARENT  0x00000000u  /* R=0,   G=0,   B=0,   A=0   */
+#define RGA_COLOR_GREEN        0xFF00FF00u  /* R=0,   G=255, B=0,   A=255 */
+#define RGA_COLOR_RED          0xFF0000FFu  /* R=255, G=0,   B=0,   A=255 */
+#define RGA_COLOR_BLUE         0xFFFF0000u  /* R=0,   G=0,   B=255, A=255 */
+
 /* ---- MD config (CLI-tunable) ---- */
 typedef struct {
     int ivs_w;           /* IVS frame width          */
@@ -99,6 +113,8 @@ static md_config_t g_md_cfg = {
     .md_area = 1,
     .md_timeout = 3000,
 };
+
+static int g_color_test = 0;  /* --color-test: draw R/G/B bars and exit */
 
 static volatile int g_exit = 0;
 static void sig_handler(int s) { (void)s; g_exit = 1; }
@@ -441,11 +457,19 @@ static void ivs_deinit(void)
  * ====================================================================== */
 typedef struct {
     MB_BLK mblk;
-    void *ptr;
     int width;
     int height;
     int size;
 } ui_canvas_t;
+
+/* Wrap the MMZ buffer as an RGA buffer via its dma-buf fd.
+ * RK_FORMAT_RGBA_8888 matches the VO frame's RK_FMT_RGBA8888. */
+static rga_buffer_t ui_rga_buf(ui_canvas_t *c)
+{
+    int fd = RK_MPI_MB_Handle2Fd(c->mblk);
+    return wrapbuffer_fd_t(fd, c->width, c->height,
+                            c->width, c->height, RK_FORMAT_RGBA_8888);
+}
 
 static int ui_canvas_init(ui_canvas_t *c, int w, int h)
 {
@@ -454,11 +478,19 @@ static int ui_canvas_init(ui_canvas_t *c, int w, int h)
     c->size = w * h * 4;  /* RGBA8888 */
     int ret = RK_MPI_MMZ_Alloc(&c->mblk, c->size, 0);
     if (ret) { fprintf(stderr, "MMZ_Alloc: %#x\n", ret); return -1; }
-    c->ptr = RK_MPI_MB_Handle2VirAddr(c->mblk);
-    if (!c->ptr) { fprintf(stderr, "MMZ_Handle2VirAddr failed\n"); return -1; }
-    memset(c->ptr, 0, c->size);  /* fully transparent */
-    RK_MPI_SYS_MmzFlushCache(c->mblk, RK_FALSE);
-    printf("UI canvas: %dx%d RGBA8888 (%d bytes)\n", w, h, c->size);
+
+    /* Initial clear via RGA color fill (sync=1 waits for completion).
+     * No CPU memset, no MmzFlushCache — RGA writes the DMA buffer directly
+     * and VO reads it via hardware, so cache coherency is handled by the
+     * kernel dma-buf framework. */
+    rga_buffer_t buf = ui_rga_buf(c);
+    im_rect rect = {0, 0, w, h};
+    IM_STATUS st = imfill_t(buf, rect, (int)RGA_COLOR_TRANSPARENT, 1);
+    if (st != IM_STATUS_SUCCESS) {
+        fprintf(stderr, "RGA imfill(init clear): %d\n", st);
+        return -1;
+    }
+    printf("UI canvas: %dx%d RGBA8888 (%d bytes), RGA-cleared\n", w, h, c->size);
     return 0;
 }
 
@@ -467,69 +499,77 @@ static void ui_canvas_deinit(ui_canvas_t *c)
     RK_MPI_MMZ_Free(c->mblk);
 }
 
-/* Draw green border (opaque) on transparent canvas */
-static void ui_draw_green_border(ui_canvas_t *c, int thickness)
+/* Draw green border (opaque) on transparent canvas — 4× RGA imfill.
+ * imrectangle() exists in librga but only with C++ linkage; this file is
+ * C, so we use the C ABI imfill_t() for the four strips. */
+static int ui_draw_green_border(ui_canvas_t *c, int thickness)
 {
-    uint8_t *p = (uint8_t *)c->ptr;
+    rga_buffer_t buf = ui_rga_buf(c);
     int w = c->width;
     int h = c->height;
+    int th = thickness;
+    if (th > w / 2) th = w / 2;
+    if (th > h / 2) th = h / 2;
 
-    /* Clear to transparent */
-    memset(p, 0, c->size);
+    /* 1. Clear whole canvas to transparent (sync=1) */
+    im_rect all = {0, 0, w, h};
+    IM_STATUS st = imfill_t(buf, all, (int)RGA_COLOR_TRANSPARENT, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA clear: %d\n", st); return -1; }
 
-    /* Draw green border: top + bottom + left + right */
-    /* RGBA = (R=0, G=255, B=0, A=255) */
-    /* Top strip */
-    for (int y = 0; y < thickness && y < h; y++) {
-        uint8_t *row = p + (y * w) * 4;
-        for (int x = 0; x < w; x++) {
-            row[x*4+0] = 0;    /* B */
-            row[x*4+1] = 255;  /* G */
-            row[x*4+2] = 0;    /* R */
-            row[x*4+3] = 255;  /* A */
-        }
-    }
-    /* Bottom strip */
-    for (int y = h - thickness; y < h; y++) {
-        if (y < 0) continue;
-        uint8_t *row = p + (y * w) * 4;
-        for (int x = 0; x < w; x++) {
-            row[x*4+0] = 0;
-            row[x*4+1] = 255;
-            row[x*4+2] = 0;
-            row[x*4+3] = 255;
-        }
-    }
-    /* Left strip */
-    for (int y = 0; y < h; y++) {
-        uint8_t *row = p + (y * w) * 4;
-        for (int x = 0; x < thickness && x < w; x++) {
-            row[x*4+0] = 0;
-            row[x*4+1] = 255;
-            row[x*4+2] = 0;
-            row[x*4+3] = 255;
-        }
-    }
-    /* Right strip */
-    for (int y = 0; y < h; y++) {
-        uint8_t *row = p + (y * w) * 4;
-        for (int x = w - thickness; x < w; x++) {
-            if (x < 0) continue;
-            row[x*4+0] = 0;
-            row[x*4+1] = 255;
-            row[x*4+2] = 0;
-            row[x*4+3] = 255;
-        }
-    }
+    /* 2. Top strip */
+    im_rect top = {0, 0, w, th};
+    st = imfill_t(buf, top, (int)RGA_COLOR_GREEN, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA top: %d\n", st); return -1; }
 
-    RK_MPI_SYS_MmzFlushCache(c->mblk, RK_FALSE);
+    /* 3. Bottom strip */
+    im_rect bot = {0, h - th, w, th};
+    st = imfill_t(buf, bot, (int)RGA_COLOR_GREEN, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA bottom: %d\n", st); return -1; }
+
+    /* 4. Left strip */
+    im_rect lft = {0, 0, th, h};
+    st = imfill_t(buf, lft, (int)RGA_COLOR_GREEN, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA left: %d\n", st); return -1; }
+
+    /* 5. Right strip */
+    im_rect rgt = {w - th, 0, th, h};
+    st = imfill_t(buf, rgt, (int)RGA_COLOR_GREEN, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA right: %d\n", st); return -1; }
+
+    return 0;
 }
 
-/* Clear canvas to fully transparent */
-static void ui_draw_transparent(ui_canvas_t *c)
+/* Clear canvas to fully transparent — single RGA imfill (sync=1) */
+static int ui_draw_transparent(ui_canvas_t *c)
 {
-    memset(c->ptr, 0, c->size);
-    RK_MPI_SYS_MmzFlushCache(c->mblk, RK_FALSE);
+    rga_buffer_t buf = ui_rga_buf(c);
+    im_rect all = {0, 0, c->width, c->height};
+    IM_STATUS st = imfill_t(buf, all, (int)RGA_COLOR_TRANSPARENT, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA clear: %d\n", st); return -1; }
+    return 0;
+}
+
+/* One-shot R/G/B color test: three vertical bars to verify R/B ordering.
+ * Draws red (left third), green (middle), blue (right third). */
+static int ui_draw_color_test(ui_canvas_t *c)
+{
+    rga_buffer_t buf = ui_rga_buf(c);
+    int w = c->width;
+    int h = c->height;
+    int third = w / 3;
+
+    im_rect r = {0,         0, third,     h};
+    im_rect g = {third,     0, third,     h};
+    im_rect b = {2 * third, 0, w - 2*third, h};
+
+    IM_STATUS st;
+    st = imfill_t(buf, r, (int)RGA_COLOR_RED, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA red: %d\n", st); return -1; }
+    st = imfill_t(buf, g, (int)RGA_COLOR_GREEN, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA green: %d\n", st); return -1; }
+    st = imfill_t(buf, b, (int)RGA_COLOR_BLUE, 1);
+    if (st != IM_STATUS_SUCCESS) { fprintf(stderr, "RGA blue: %d\n", st); return -1; }
+    return 0;
 }
 
 static int ui_send(ui_canvas_t *c)
@@ -653,10 +693,12 @@ static void print_usage(const char *name)
     printf("  --md-move N        ThreshMove (default 2)\n");
     printf("  --md-area N        Area threshold %% of frame (default 1)\n");
     printf("  --md-timeout MS    Green border hold after motion, ms (default 3000)\n");
+    printf("  --color-test       Draw R/G/B bars once and exit (verify R/B order)\n");
     printf("  -h, --help         Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --ivs-size 640x360 --md-sens 5 --md-sad 50\n", name);
     printf("  %s --md-area 5 --md-timeout 5000\n", name);
+    printf("  %s --color-test   (then run: modetest -M rockchip -w 59:zpos:0)\n", name);
 }
 
 static int parse_size(const char *s, int *w, int *h)
@@ -681,6 +723,7 @@ static void parse_args(int argc, char *argv[])
         {"md-move",    required_argument, 0, 'm'},
         {"md-area",    required_argument, 0, 'A'},
         {"md-timeout", required_argument, 0, 't'},
+        {"color-test", no_argument,       0, 'c'},
         {"help",       no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -707,6 +750,9 @@ static void parse_args(int argc, char *argv[])
         case 't': /* --md-timeout */
             g_md_cfg.md_timeout = atoi(optarg);
             break;
+        case 'c': /* --color-test */
+            g_color_test = 1;
+            break;
         case 'h':
             print_usage(argv[0]);
             exit(0);
@@ -727,10 +773,42 @@ int main(int argc, char *argv[])
 
     parse_args(argc, argv);
 
+    if (g_color_test) {
+        printf("\n=== vi_vo_compose_test -- R/G/B color test ===\n");
+        printf("    Draws RED (left), GREEN (middle), BLUE (right) bars.\n");
+        printf("    Verify on display that R/B are not swapped.\n");
+        printf("    Run: modetest -M rockchip -w 59:zpos:0\n\n");
+        fflush(stdout);
+
+        int ret = RK_MPI_SYS_Init();
+        if (ret) { fprintf(stderr, "SYS_Init: %#x\n", ret); return 1; }
+
+        ui_canvas_t canvas;
+        if (vo_init() < 0) goto ct_cleanup_sys;
+        if (ui_canvas_init(&canvas, DISP_W, DISP_H) < 0) goto ct_cleanup_vo;
+
+        if (ui_draw_color_test(&canvas) < 0) goto ct_cleanup_canvas;
+        int sret = ui_send(&canvas);
+        if (sret) fprintf(stderr, "UI send: %#x\n", sret);
+
+        printf("Color test sent. Waiting 8s for visual check...\n");
+        fflush(stdout);
+        sleep(8);
+
+    ct_cleanup_canvas:
+        ui_canvas_deinit(&canvas);
+    ct_cleanup_vo:
+        vo_deinit();
+    ct_cleanup_sys:
+        RK_MPI_SYS_Exit();
+        printf("color-test done\n");
+        return 0;
+    }
+
     printf("\n=== vi_vo_compose_test (2 cameras + green border overlay) ===\n");
     printf("    Cam0: GC2093 #1 → VI dev0/pipe0 → VO chn0 (full screen, ROT90)\n");
     printf("    Cam1: GC2093 #2 → VI dev1/pipe1 → VO chn1 (PiP 1/4, ROT90)\n");
-    printf("    UI:   RGBA8888 → VO chn2 (green border, priority=2)\n");
+    printf("    UI:   RGBA8888 → VO chn2 (green border, priority=2, RGA-drawn)\n");
     printf("    IVS:  MD on cam0 → drives green border\n");
     printf("    VO layer 0: GRAPHIC + RGA splice\n");
     printf("    MD config: ivs=%dx%d sens=%d sad=%d move=%d area=%d%% timeout=%dms\n\n",
