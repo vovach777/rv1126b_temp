@@ -117,7 +117,7 @@ set(SYSROOT_LIB_DIR "K:/cross_sysroot_aarch64/usr/lib" CACHE PATH "Sysroot lib d
 link_directories(${ROCKIT_LIB} ${LIB_RGA_PATH} ${SYSROOT_LIB_DIR})
 
 # --- Программы ---
-set(PROGRAMS vi_grab_frame vi_grab_avs vi_grab_dual vpss_fanout_test avs_mega_fanout_test vi_vo_ivs_md_test vi_vo_bind_test vi_vo_compose_test vi_vo_compose_alpha_test)
+set(PROGRAMS vi_grab_frame vi_grab_avs vi_grab_dual vpss_fanout_test avs_mega_fanout_test vi_vo_ivs_md_test vi_vo_bind_test vi_vo_compose_test vi_vo_compose_alpha_test vi_vo_staged_test)
 foreach(prog ${PROGRAMS})
     set(src "${CMAKE_SOURCE_DIR}/app/vi_grab_frame/${prog}.c")
     set(extra_src "${CMAKE_SOURCE_DIR}/app/vi_grab_frame/dma_alloc.c")

@@ -1,10 +1,11 @@
-/* vi_vo_compose_test.c — 2 камеры + green border overlay на VO layer
+/* vi_vo_compose_test.c — 2 камеры + miniPiP + green border overlay на VO layer
  *
  * Архитектура (по паттерну rkadk_dual_disp_test + rkadk_ui):
  *
  *   GC2093 #1 → VI dev 0 / pipe 0
  *                ├─ ext chn 4 → SYS_Bind → IVS MD
- *                └─ ext chn 5 → SYS_Bind → VO chn 0 (full screen, priority=0, ROT90)
+ *                ├─ ext chn 5 → SYS_Bind → VO chn 0 (full screen, priority=0, ROT90)
+ *                └─ ext chn 3 → SYS_Bind → VO chn 3 (miniPiP 1/8, top-right, priority=3, ROT90, 4fps)
  *
  *   GC2093 #2 → VI dev 1 / pipe 1
  *                └─ ext chn 5 → SYS_Bind → VO chn 1 (PiP 1/4, priority=1, ROT90)
@@ -12,7 +13,7 @@
  *   App → MMZ RGBA8888 → VO chn 2 (green border, priority=2, SendFrame)
  *                         alpha=255 при MD, alpha=0 без MD
  *
- *   VO layer 0: GRAPHIC + RGA splice (composites chn 0 + chn 1 + chn 2)
+ *   VO layer 0: GRAPHIC + RGA splice (composites chn 0 + chn 1 + chn 2 + chn 3)
  *   VOP2: один OVERLAY plane → MIPI display 720x1280
  *
  * Запуск:
@@ -61,6 +62,19 @@
 #define DISP_W      720
 #define DISP_H      1280
 
+/*
+ * RV1126B BSP: Use VI EXT channels 2..5 only.
+ *
+ * ch6 maps to rkvpss_scale4 and is NOT usable as a normal VI EXT
+ * output in this BSP:
+ *   online  -> STREAM_ON succeeds but stalls existing scale2/ch4;
+ *   offline -> STREAM_ON fails;
+ *   afterwards VPSS may require reboot.
+ *
+ * Verified experimentally. Do not move miniPiP back to ch6.
+ */
+#define VI_CHN_MINIPIP  3   /* ext chn for mini PiP (cam0, 4fps) → rkvpss_scale0 */
+
 /* ---- VI ---- */
 #define VI_DEV_CAM0     0
 #define VI_PIPE_CAM0    0
@@ -74,8 +88,9 @@
 #define VO_LAYER    0
 #define VO_DEV      0
 #define VO_CHN_CAM0     0   /* full screen */
-#define VO_CHN_CAM1     1   /* PiP */
+#define VO_CHN_CAM1     1   /* PiP (cam1, bottom-right) */
 #define VO_CHN_UI       2   /* green border */
+#define VO_CHN_CAM2     3   /* mini PiP (cam0, top-right, 4fps) */
 
 /* ---- IVS ---- */
 #define IVS_CHN     0
@@ -156,6 +171,26 @@ static int vi_init_cam(int dev_id, int pipe_id, int enable_ivs)
         if (ret) { fprintf(stderr, "VI_SetDevBindPipe[%d]: %#x\n", dev_id, ret); return -1; }
     }
 
+    /* Mini PiP ext chn (overlay, only for cam 0) — 4 fps via frame rate control.
+     * Uses ch3 → rkvpss_scale0 (verified working, see comment above). */
+    if (enable_ivs) {
+        VI_CHN_ATTR_S chnAttr2;
+        memset(&chnAttr2, 0, sizeof(chnAttr2));
+        chnAttr2.stIspOpt.u32BufCount = 3;
+        chnAttr2.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
+        chnAttr2.stSize.u32Width = CAM_W;
+        chnAttr2.stSize.u32Height = CAM_H;
+        chnAttr2.enPixelFormat = RK_FMT_YUV420SP;
+        chnAttr2.enCompressMode = COMPRESS_MODE_NONE;
+        chnAttr2.u32Depth = 0;  /* bound to VO, no manual GetChnFrame */
+        chnAttr2.stFrameRate.s32SrcFrameRate = 30;
+        chnAttr2.stFrameRate.s32DstFrameRate = 4;  /* drop to 4 fps */
+        ret = RK_MPI_VI_SetChnAttr(pipe_id, VI_CHN_MINIPIP, &chnAttr2);
+        if (ret) { fprintf(stderr, "VI_SetChnAttr[MINIPIP pipe%d]: %#x\n", pipe_id, ret); return -1; }
+        ret = RK_MPI_VI_EnableChn(pipe_id, VI_CHN_MINIPIP);
+        if (ret) { fprintf(stderr, "VI_EnableChn[MINIPIP pipe%d]: %#x\n", pipe_id, ret); return -1; }
+    }
+
     /* IVS ext chn (only for cam 0) */
     if (enable_ivs) {
         VI_CHN_ATTR_S chnAttr;
@@ -175,7 +210,7 @@ static int vi_init_cam(int dev_id, int pipe_id, int enable_ivs)
         if (ret) { fprintf(stderr, "VI_EnableChn[IVS pipe%d]: %#x\n", pipe_id, ret); return -1; }
     }
 
-    /* Display ext chn */
+    /* Display ext chn (primary) — created LAST */
     VI_CHN_ATTR_S chnAttr;
     memset(&chnAttr, 0, sizeof(chnAttr));
     chnAttr.stIspOpt.u32BufCount = 3;
@@ -189,10 +224,13 @@ static int vi_init_cam(int dev_id, int pipe_id, int enable_ivs)
     ret = RK_MPI_VI_EnableChn(pipe_id, VI_CHN_DISP);
     if (ret) { fprintf(stderr, "VI_EnableChn[DISP pipe%d]: %#x\n", pipe_id, ret); return -1; }
 
-    printf("VI: dev %d pipe %d — ext chn %d%s + ext chn %d (DISP %dx%d, bound)\n",
+    printf("VI: dev %d pipe %d — ext chn %d%s + ext chn %d (DISP %dx%d, bound)",
            dev_id, pipe_id, enable_ivs ? VI_CHN_IVS : -1,
            enable_ivs ? " (IVS)" : "",
            VI_CHN_DISP, CAM_W, CAM_H);
+    if (enable_ivs)
+        printf(" + ext chn %d (miniPiP %dx%d, 30→4fps)", VI_CHN_MINIPIP, CAM_W, CAM_H);
+    printf("\n");
     if (enable_ivs)
         printf("     IVS size: %dx%d\n", g_md_cfg.ivs_w, g_md_cfg.ivs_h);
     return 0;
@@ -220,15 +258,23 @@ static int vi_init(void)
 
 static void vi_deinit(void)
 {
-    RK_MPI_VI_DisableChn(VI_PIPE_CAM1, VI_CHN_DISP);
-    RK_MPI_VI_DisableChn(VI_PIPE_CAM0, VI_CHN_DISP);
-    RK_MPI_VI_DisableChn(VI_PIPE_CAM0, VI_CHN_IVS);
-    RK_MPI_VI_DisableDev(VI_DEV_CAM1);
-    RK_MPI_VI_DisableDev(VI_DEV_CAM0);
+    int ret;
+    ret = RK_MPI_VI_DisableChn(VI_PIPE_CAM0, VI_CHN_MINIPIP);
+    if (ret) fprintf(stderr, "VI_DisableChn[MINIPIP]: %#x\n", ret);
+    ret = RK_MPI_VI_DisableChn(VI_PIPE_CAM1, VI_CHN_DISP);
+    if (ret) fprintf(stderr, "VI_DisableChn[pipe1/DISP]: %#x\n", ret);
+    ret = RK_MPI_VI_DisableChn(VI_PIPE_CAM0, VI_CHN_DISP);
+    if (ret) fprintf(stderr, "VI_DisableChn[pipe0/DISP]: %#x\n", ret);
+    ret = RK_MPI_VI_DisableChn(VI_PIPE_CAM0, VI_CHN_IVS);
+    if (ret) fprintf(stderr, "VI_DisableChn[IVS]: %#x\n", ret);
+    ret = RK_MPI_VI_DisableDev(VI_DEV_CAM1);
+    if (ret) fprintf(stderr, "VI_DisableDev[1]: %#x\n", ret);
+    ret = RK_MPI_VI_DisableDev(VI_DEV_CAM0);
+    if (ret) fprintf(stderr, "VI_DisableDev[0]: %#x\n", ret);
 }
 
 /* ========================================================================
- * VO init — GRAPHIC + RGA splice, 3 channels
+ * VO init — GRAPHIC + RGA splice, 4 channels
  * ====================================================================== */
 static int vo_init(void)
 {
@@ -332,6 +378,24 @@ static int vo_init(void)
     ret = RK_MPI_VO_EnableChn(VO_LAYER, VO_CHN_UI);
     if (ret) { fprintf(stderr, "VO_EnableChn[ui]: %#x\n", ret); return -1; }
 
+    /* ---- Chn 3: cam 0, mini PiP (1/8 screen), top-right, priority=3, ROT90 ---- */
+    int mini_w = pip_w / 2;   /* 180 — half of PiP */
+    int mini_h = pip_h / 2;   /* 320 */
+    int mini_x = dispW - mini_w;  /* top-right */
+    int mini_y = 0;
+    memset(&VoChnAttr, 0, sizeof(VoChnAttr));
+    VoChnAttr.bDeflicker = RK_FALSE;
+    VoChnAttr.u32Priority = 3;
+    VoChnAttr.stRect.s32X = mini_x;
+    VoChnAttr.stRect.s32Y = mini_y;
+    VoChnAttr.stRect.u32Width = mini_w;
+    VoChnAttr.stRect.u32Height = mini_h;
+    VoChnAttr.enRotation = ROTATION_90;
+    ret = RK_MPI_VO_SetChnAttr(VO_LAYER, VO_CHN_CAM2, &VoChnAttr);
+    if (ret) { fprintf(stderr, "VO_SetChnAttr[miniPiP]: %#x\n", ret); return -1; }
+    ret = RK_MPI_VO_EnableChn(VO_LAYER, VO_CHN_CAM2);
+    if (ret) { fprintf(stderr, "VO_EnableChn[miniPiP]: %#x\n", ret); return -1; }
+
     /* ---- SYS_Bind VI → VO ---- */
     MPP_CHN_S vi_chn, vo_chn;
 
@@ -355,34 +419,63 @@ static int vo_init(void)
     ret = RK_MPI_SYS_Bind(&vi_chn, &vo_chn);
     if (ret) { fprintf(stderr, "SYS_Bind VI1→VO1: %#x\n", ret); return -1; }
 
+    /* cam 0 ext chn3 → VO chn 3 (mini PiP, 4fps) */
+    vi_chn.enModId = RK_ID_VI;
+    vi_chn.s32DevId = 0;
+    vi_chn.s32ChnId = VI_CHN_MINIPIP;
+    vo_chn.enModId = RK_ID_VO;
+    vo_chn.s32DevId = VO_LAYER;
+    vo_chn.s32ChnId = VO_CHN_CAM2;
+    ret = RK_MPI_SYS_Bind(&vi_chn, &vo_chn);
+    if (ret) { fprintf(stderr, "SYS_Bind VI0ext→VO3: %#x\n", ret); return -1; }
+
     printf("VO: %dx%d, layer=%d (GRAPHIC+RGA)\n", dispW, dispH, VO_LAYER);
     printf("  chn %d: cam0 full screen (priority=0, ROT90)\n", VO_CHN_CAM0);
     printf("  chn %d: cam1 PiP (%d,%d,%dx%d) (priority=1, ROT90)\n",
            VO_CHN_CAM1, pip_x, pip_y, pip_w, pip_h);
     printf("  chn %d: UI green border (priority=2, SendFrame RGBA8888)\n", VO_CHN_UI);
+    printf("  chn %d: cam0 miniPiP (%d,%d,%dx%d) (priority=3, ROT90, 4fps)\n",
+           VO_CHN_CAM2, mini_x, mini_y, mini_w, mini_h);
     return 0;
 }
 
 static void vo_deinit(void)
 {
     MPP_CHN_S vi_chn, vo_chn;
+    int ret;
+
+    /* Unbind mini PiP (cam0 ext chn3 → VO chn3) */
+    vi_chn.enModId = RK_ID_VI; vi_chn.s32DevId = 0; vi_chn.s32ChnId = VI_CHN_MINIPIP;
+    vo_chn.enModId = RK_ID_VO; vo_chn.s32DevId = VO_LAYER; vo_chn.s32ChnId = VO_CHN_CAM2;
+    ret = RK_MPI_SYS_UnBind(&vi_chn, &vo_chn);
+    if (ret) fprintf(stderr, "SYS_UnBind[MINIPIP→VO3]: %#x\n", ret);
 
     /* Unbind cam 1 */
     vi_chn.enModId = RK_ID_VI; vi_chn.s32DevId = 1; vi_chn.s32ChnId = VI_CHN_DISP;
     vo_chn.enModId = RK_ID_VO; vo_chn.s32DevId = VO_LAYER; vo_chn.s32ChnId = VO_CHN_CAM1;
-    RK_MPI_SYS_UnBind(&vi_chn, &vo_chn);
+    ret = RK_MPI_SYS_UnBind(&vi_chn, &vo_chn);
+    if (ret) fprintf(stderr, "SYS_UnBind[VI1→VO1]: %#x\n", ret);
 
     /* Unbind cam 0 */
     vi_chn.enModId = RK_ID_VI; vi_chn.s32DevId = 0; vi_chn.s32ChnId = VI_CHN_DISP;
     vo_chn.enModId = RK_ID_VO; vo_chn.s32DevId = VO_LAYER; vo_chn.s32ChnId = VO_CHN_CAM0;
-    RK_MPI_SYS_UnBind(&vi_chn, &vo_chn);
+    ret = RK_MPI_SYS_UnBind(&vi_chn, &vo_chn);
+    if (ret) fprintf(stderr, "SYS_UnBind[VI0→VO0]: %#x\n", ret);
 
-    RK_MPI_VO_DisableChn(VO_LAYER, VO_CHN_UI);
-    RK_MPI_VO_DisableChn(VO_LAYER, VO_CHN_CAM1);
-    RK_MPI_VO_DisableChn(VO_LAYER, VO_CHN_CAM0);
-    RK_MPI_VO_DisableLayer(VO_LAYER);
-    RK_MPI_VO_Disable(VO_DEV);
-    RK_MPI_VO_UnBindLayer(VO_LAYER, VO_DEV);
+    ret = RK_MPI_VO_DisableChn(VO_LAYER, VO_CHN_CAM2);
+    if (ret) fprintf(stderr, "VO_DisableChn[miniPiP]: %#x\n", ret);
+    ret = RK_MPI_VO_DisableChn(VO_LAYER, VO_CHN_UI);
+    if (ret) fprintf(stderr, "VO_DisableChn[ui]: %#x\n", ret);
+    ret = RK_MPI_VO_DisableChn(VO_LAYER, VO_CHN_CAM1);
+    if (ret) fprintf(stderr, "VO_DisableChn[cam1]: %#x\n", ret);
+    ret = RK_MPI_VO_DisableChn(VO_LAYER, VO_CHN_CAM0);
+    if (ret) fprintf(stderr, "VO_DisableChn[cam0]: %#x\n", ret);
+    ret = RK_MPI_VO_DisableLayer(VO_LAYER);
+    if (ret) fprintf(stderr, "VO_DisableLayer: %#x\n", ret);
+    ret = RK_MPI_VO_Disable(VO_DEV);
+    if (ret) fprintf(stderr, "VO_Disable: %#x\n", ret);
+    ret = RK_MPI_VO_UnBindLayer(VO_LAYER, VO_DEV);
+    if (ret) fprintf(stderr, "VO_UnBindLayer: %#x\n", ret);
 }
 
 /* ========================================================================
@@ -446,10 +539,13 @@ static int ivs_init(void)
 static void ivs_deinit(void)
 {
     MPP_CHN_S vi_chn, ivs_chn;
+    int ret;
     vi_chn.enModId = RK_ID_VI; vi_chn.s32DevId = 0; vi_chn.s32ChnId = VI_CHN_IVS;
     ivs_chn.enModId = RK_ID_IVS; ivs_chn.s32DevId = 0; ivs_chn.s32ChnId = IVS_CHN;
-    RK_MPI_SYS_UnBind(&vi_chn, &ivs_chn);
-    RK_MPI_IVS_DestroyChn(IVS_CHN);
+    ret = RK_MPI_SYS_UnBind(&vi_chn, &ivs_chn);
+    if (ret) fprintf(stderr, "SYS_UnBind[VI→IVS]: %#x\n", ret);
+    ret = RK_MPI_IVS_DestroyChn(IVS_CHN);
+    if (ret) fprintf(stderr, "IVS_DestroyChn: %#x\n", ret);
 }
 
 /* ========================================================================
@@ -805,9 +901,10 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    printf("\n=== vi_vo_compose_test (2 cameras + green border overlay) ===\n");
+    printf("\n=== vi_vo_compose_test (2 cameras + miniPiP + green border overlay) ===\n");
     printf("    Cam0: GC2093 #1 → VI dev0/pipe0 → VO chn0 (full screen, ROT90)\n");
     printf("    Cam1: GC2093 #2 → VI dev1/pipe1 → VO chn1 (PiP 1/4, ROT90)\n");
+    printf("    Cam0: ext chn3 → VO chn3 (miniPiP 1/8, top-right, ROT90, 4fps)\n");
     printf("    UI:   RGBA8888 → VO chn2 (green border, priority=2, RGA-drawn)\n");
     printf("    IVS:  MD on cam0 → drives green border\n");
     printf("    VO layer 0: GRAPHIC + RGA splice\n");
@@ -836,7 +933,7 @@ int main(int argc, char *argv[])
     pthread_create(&ui_tid, NULL, ui_thread, &canvas);
 
     printf("\n=== RUNNING (Ctrl-C to stop) ===\n");
-    printf("    Video: cam0 full + cam1 PiP on display\n");
+    printf("    Video: cam0 full + cam1 PiP + cam0 miniPiP(4fps) on display\n");
     printf("    Green border appears when MD detects motion\n");
     printf("    Run: modetest -M rockchip -w 59:zpos:0\n\n");
     fflush(stdout);
