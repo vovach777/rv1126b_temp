@@ -1457,6 +1457,67 @@ flowchart TD
 - `VO_SPLICE_MODE_RGA` — композиция нескольких каналов через RGA
 - `ROTATION_90` — поворот для портретной LCD-панели
 
+#### Артефакты портирования: DRM → rockit-VO overlay
+
+При переходе со старой платы (RV1109/1126, direct DRM) на новую (RV1126B, rockit-VO) возникли проблемы, решённые подбором формата и режима. Все проверены экспериментально.
+
+**Формат слоя и overlay-канала:**
+
+| Параметр | Значение | Почему |
+|---|---|---|
+| Layer `enPixFormat` | `RK_FMT_RGB888` | NV12 → green screen (DSI не интерпретирует NV12 UV); RGB888 → blank в bypass; **RGB888 + RGA splice → works** |
+| UI overlay chn `enPixelFormat` | `RK_FMT_RGBA8888` | Per-pixel alpha для green border (alpha=255 motion, alpha=0 idle). RGA splice композирует RGBA8888 поверх NV12 → RGB888 output |
+
+**Режим композиции:**
+
+| Режим | Результат |
+|---|---|
+| `bBypassFrame=TRUE` | Black screen через несколько секунд (без weston). VO не масштабирует, RGA выключен |
+| `VO_SPLICE_MODE_RGA` | **Works stably** — RGA композирует N каналов (NV12 video + RGBA8888 UI) → RGB888 output на VOP2 |
+
+**Инициализация VO (паттерн rkadk):**
+
+```c
+RK_MPI_VO_BindLayer(layer, dev, VO_LAYER_MODE_GRAPHIC);  // ДО SetPubAttr
+RK_MPI_VO_SetLayerDispBufLen(layer, 2);
+RK_MPI_VO_GetPubAttr(dev, &pubAttr);  // получить реальные dims из driver (720x1280)
+RK_MPI_VO_SetLayerAttr(layer, &layerAttr);  // stDispRect + stImageSize = driver dims
+RK_MPI_VO_SetLayerSpliceMode(layer, VO_SPLICE_MODE_RGA);
+RK_MPI_VO_EnableLayer(layer);
+```
+
+**Порядок создания каналов и приоритеты (Z-order):**
+
+```
+chn0 (cam0 full):   priority=0  (низ)
+chn1 (cam1 PiP):    priority=1
+chn3 (miniPiP):     priority=1  (тот же уровень, что cam1 PiP)
+chn2 (UI border):   priority=2  (верх — поверх видео)
+```
+
+**UI overlay через SendFrame (не bind):**
+
+```c
+// MMZ buffer (rockit-managed, has phys addr — VO может читать)
+RK_MPI_MMZ_Alloc(&mblk, w * h * 4, 0);
+// RGA рисует в MMZ (imfill_t, RK_FORMAT_RGBA_8888)
+// SendFrame на VO chn:
+VIDEO_FRAME_INFO_S stFrame;
+stFrame.stVFrame.enPixelFormat = RK_FMT_RGBA8888;
+stFrame.stVFrame.u32Width = w;
+stFrame.stVFrame.u32Height = h;
+stFrame.pBlkFrame = mblk;  // MMZ MB_BLK напрямую
+RK_MPI_VO_SendFrame(layer, chn, &stFrame, 1000);
+```
+
+**Что НЕ работает (проверено):**
+- External dma_buf + `RK_MPI_MB_CreateMB` → blank (VO bypass не может читать external buffer)
+- NV12 layer + bypass → green (DSI не интерпретирует NV12 UV)
+- RGB888 layer + bypass → blank (DSI ожидает BGRA, не RGB888)
+- `VO_SPLICE_MODE_RGA` + AVS stitch одновременно → RGA conflict (`doBlit failed` в dmesg)
+
+**Рабочий паттерн:** `VO_LAYER_MODE_GRAPHIC` + `VO_SPLICE_MODE_RGA` + layer `RGB888` + video chns `NV12` (bind) + UI chn `RGBA8888` (SendFrame из MMZ).
+
 ### NPU (RKNN) — отдельный мир
 
 NPU **не часть rockit MPI** — нет заголовков `rk_mpi_npu.h` или `rk_comm_npu.h`. NPU доступен через отдельный **RKNN SDK** (`external/rknpu2/`).
