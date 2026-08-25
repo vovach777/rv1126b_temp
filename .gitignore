@@ -1,11 +1,14 @@
 # Build artifacts
 build/
+build_*/
 *.o
 *.o.d
 *.a
 *.so
 *.so.*
 *.dylib
+*.dll
+mapfile*
 
 # CMake
 CMakeCache.txt
@@ -35,6 +38,23 @@ _*.sh
 _*.txt
 _split_test/
 _board_lib/
+zigcache/
+
+# Toolchain installers / Windows binaries (NEVER commit)
+*.msi
+*.exe
+arm-*.zip
+
+# Commit message drafts
+commit*.txt
+
+# Windows experiment artifacts
+screenshot*
+wininfo.*
+find_window.*
+s30gui_*.{txt,png,pro,exe}
+gl_stub.c
+test_simple.c
 
 # Raw test captures (large, regenerate on demand)
 *.raw
@@ -47,4 +67,7 @@ test*.raw
 avs0.*
 mega_frame*.raw
 mega_warmup*.raw
+
+# Root-level image dumps (docs/ images are tracked separately)
+/*.png
 

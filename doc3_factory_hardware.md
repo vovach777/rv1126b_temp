@@ -45,15 +45,11 @@ mmcblk0p8  944M  (userdata)
 ssh factory          # → root@10.0.61.227 (ключ без пароля)
 ```
 
-**SSH (VM pvv → через WiFi 172.17):**
-```
-ssh factory          # → root@172.17.15.107
-```
-
-**UART (CP2102, COM30, 115200):**
+**UART (опциональный, плавающий — CP2102, 115200 baud):**
 - TX→RX, RX→TX, GND→GND (кросс!)
 - Скорость: **115200** (НЕ стандарт Rockchip 1500000)
 - Debug UART = неподписанные штырьки RX TX GND (UART2/fiq_debugger)
+- Подключается к любой плате по необходимости
 
 **Login:** root / пароль `rpdzkj` (ключ добавлен 2026-08-10)
 
@@ -61,15 +57,9 @@ ssh factory          # → root@172.17.15.107
 
 **LAN (eth0):** статический
 - `/etc/systemd/network/20-ethernet.network`
-- IP: 10.0.61.227/8 (также 172.17.2.37/16 через DHCP)
+- IP: 10.0.61.227/8
 
-**WiFi (wlan0):** статический, AP6256 (Broadcom)
-- `/etc/systemd/network/30-wlan.network`
-- IP: 172.17.15.107/16
-- Gateway: 172.17.15.254
-- DNS: 172.17.0.193, 78.37.77.77
-- SSID: PERCo, PSK: 11111111
-- `wpa_supplicant-wlan0.conf`: `p2p_disabled=1`
+> WiFi (AP6256) есть аппаратно, но **не используется** — работаем через LAN/OTG/UART.
 
 ---
 
@@ -300,19 +290,17 @@ K:\sdk\external\
 
 ### 6.4 Конвертация моделей (RKNN)
 
-**VM `rockconv`** (SSH: `ssh pvv` → 172.17.0.69, Ubuntu 24.04.3, Docker 29.1.3):
-- Docker образ `rknn-toolkit2` v2.3.2, cp38
-- `sudo` пароль: `mercury`
+Конвертация выполняется на `conv` (см. `K:\sdk\AGENTS.md` → «Компьютер конвертации моделей»):
+- Docker образ `rknn-toolkit2:2.3.2`
 
 **Готовая модель:**
 ```
-RetinaFace_mobile320.onnx (1.7 MB)
+RetinaFace_mobile320.onnx
     ↓ rknn-toolkit2 v2.3.2, INT8, target=rv1126b
-RetinaFace_mobile320_rv1126b.rknn (925 KB)
+RetinaFace_mobile320_rv1126b.rknn
 ```
 - Файлы: `T:\rknn_convert\` (ONNX, convert_rv1126b.py, model/dataset.txt, model/test.jpg)
-- На VM: `~/rknn_convert/`
-- Запуск: `docker run --rm -v /home/pvv/rknn_convert:/work -w /work rknn-toolkit2 python3 convert_rv1126b.py`
+- Запуск: `ssh conv 'docker run --rm -v ~/rknn-docker:/workspace rknn-toolkit2:2.3.2 python /workspace/convert_rv1126b.py'`
 - Модель: 65 слоёв, 3 головы детекции (Bbox/Class/Landmark), 320×320 вход
 
 ### 6.5 EASY-EAI Toolkit (альтернативный SDK)
